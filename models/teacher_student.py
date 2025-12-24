@@ -207,7 +207,7 @@ class TeacherStudentFramework:
         )
         
         # Also sync EMA with current Student state
-        self.ema_updater.model.load_state_dict(self.student.model.state_dict())
+        self.ema_updater.ema_model.load_state_dict(self.student.model.state_dict())
     
     def export_student(self, path: str, format: str = "pt"):
         """Export trained Student model."""
