@@ -212,6 +212,37 @@ class SSODTrainer:
         
         if self.skip_colorization:
             logger.info("Skip colorization enabled: using original labeled data directly")
+        
+        # Progressive threshold settings
+        ssod_cfg = self.config.get('ssod', {})
+        self.progressive_threshold = ssod_cfg.get('progressive_threshold', True)
+        self.tau_start = ssod_cfg.get('tau_start', 0.5)
+        self.tau_end = ssod_cfg.get('tau_end', 0.75)
+        
+        if self.progressive_threshold:
+            logger.info(f"Progressive threshold enabled: {self.tau_start} -> {self.tau_end}")
+    
+    def _get_progressive_threshold(self, epoch: int) -> float:
+        """
+        Calculate confidence threshold that increases over training.
+        Starts low (more pseudo-labels) and increases as Teacher improves.
+        """
+        train_cfg = self.config['training']
+        burn_in_epochs = train_cfg['burn_in_epochs']
+        max_epochs = train_cfg['max_epochs']
+        
+        if epoch < burn_in_epochs:
+            return self.tau_end  # Not used during burn-in anyway
+        
+        # Progress from 0 to 1 over SSOD phase
+        ssod_epochs = max_epochs - burn_in_epochs
+        current_ssod_epoch = epoch - burn_in_epochs
+        progress = min(current_ssod_epoch / max(ssod_epochs, 1), 1.0)
+        
+        # Linear interpolation from tau_start to tau_end
+        threshold = self.tau_start + (self.tau_end - self.tau_start) * progress
+        
+        return threshold
     
     def train(self):
         """
@@ -252,12 +283,19 @@ class SSODTrainer:
             
             # === PHASE 2: Generate Pseudo-labels & Train (if not burn-in) ===
             if not is_burnin:
-                logger.info("Phase 2: Generating pseudo-labels from Teacher...")
-                pseudo_stats = self._generate_pseudo_labels(unlabeled_images)
+                # Get progressive threshold for current epoch
+                current_threshold = self._get_progressive_threshold(epoch)
+                logger.info(f"Phase 2: Generating pseudo-labels (threshold={current_threshold:.3f})...")
+                
+                pseudo_stats = self._generate_pseudo_labels(unlabeled_images, current_threshold)
                 logger.info(f"Pseudo-label stats: {pseudo_stats}")
                 
-                logger.info("Phase 3: Training on pseudo-labeled data...")
-                self._train_unsupervised(epoch)
+                # Only train on pseudo-labels if we have any
+                if pseudo_stats.get('with_labels', 0) > 0:
+                    logger.info("Phase 3: Training on pseudo-labeled data...")
+                    self._train_unsupervised(epoch)
+                else:
+                    logger.warning("Phase 3: Skipped - no valid pseudo-labels generated")
             
             # === Update Teacher via EMA ===
             self.framework.update_teacher()
@@ -323,9 +361,14 @@ class SSODTrainer:
             name=f"unsupervised_epoch{epoch}"
         )
         
-    def _generate_pseudo_labels(self, unlabeled_dir: str) -> Dict:
-        """Generate pseudo-labels using Teacher model."""
+    def _generate_pseudo_labels(self, unlabeled_dir: str, threshold: float = None) -> Dict:
+        """Generate pseudo-labels using Teacher model with batch processing."""
         from training.pseudo_labeler import save_pseudo_labels
+        import torch
+        
+        # Use provided threshold or default
+        if threshold is None:
+            threshold = self.pseudo_labeler.threshold
         
         # Get unlabeled images
         image_dir = Path(unlabeled_dir)
@@ -335,15 +378,40 @@ class SSODTrainer:
             logger.warning(f"No images found in {unlabeled_dir}")
             return {'total': 0, 'with_labels': 0}
         
-        # Generate predictions from Teacher
-        predictions = self.framework.generate_pseudo_labels(
-            images=[str(p) for p in image_paths],
-            confidence_threshold=self.pseudo_labeler.threshold
-        )
+        # Process in batches to avoid OOM
+        BATCH_SIZE = 8
+        all_predictions = []
+        
+        logger.info(f"Generating pseudo-labels for {len(image_paths)} images (batch_size={BATCH_SIZE})...")
+        
+        for i in range(0, len(image_paths), BATCH_SIZE):
+            batch_paths = [str(p) for p in image_paths[i:i+BATCH_SIZE]]
+            
+            try:
+                batch_preds = self.framework.generate_pseudo_labels(
+                    images=batch_paths,
+                    confidence_threshold=threshold
+                )
+                all_predictions.extend(batch_preds)
+            except Exception as e:
+                logger.warning(f"Error processing batch {i//BATCH_SIZE}: {e}")
+                # Add empty predictions for failed batch
+                all_predictions.extend([{'boxes_yolo': [], 'classes': [], 'confidences': []} for _ in batch_paths])
+            
+            # Clear GPU cache after each batch
+            torch.cuda.empty_cache()
+        
+        # Update pseudo_labeler threshold for this epoch
+        self.pseudo_labeler.threshold = threshold
         
         # Filter and refine
-        filtered, stats = self.pseudo_labeler.filter_predictions(predictions)
+        filtered, stats = self.pseudo_labeler.filter_predictions(all_predictions)
         refined = [self.nms_refiner.refine(l) for l in filtered]
+        
+        # Count images with valid labels
+        images_with_labels = sum(1 for r in refined if len(r.get('boxes_yolo', [])) > 0)
+        stats['with_labels'] = images_with_labels
+        stats['threshold'] = threshold
         
         # Save pseudo-labels
         pseudo_label_dir = self.output_dir / "pseudo_labels"

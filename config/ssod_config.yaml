@@ -7,22 +7,22 @@
 data:
   # Labeled data (Gray images + annotations) - YOLO format
   labeled:
-    images: "/mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset for UAV Inspection/train/images"
-    labels: "/mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset for UAV Inspection/train/labels"
+    images: "/home/tongdat/semi-training/semi-yolo/datasets/labeled/train/images"
+    labels: "/home/tongdat/semi-training/semi-yolo/datasets/labeled/train/labels"
   
   # Unlabeled data (Real IronRed images) - No labels needed
   unlabeled:
-    images: "/mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset for UAV Inspection/test/images"
+    images: "/home/tongdat/semi-training/semi-yolo/datasets/unlabeled"
   
   # Fake IronRed output (Generated from colorization)
   fake_ironred:
-    images: "/mnt/d/ThucTap/Al_platform_Solar/datasets/fake_ironred/images"
-    labels: "/mnt/d/ThucTap/Al_platform_Solar/datasets/fake_ironred/labels"
+    images: "/home/tongdat/semi-training/semi-yolo/datasets/fake_ironred/images"
+    labels: "/home/tongdat/semi-training/semi-yolo/datasets/fake_ironred/labels"
   
   # Validation set
   val:
-    images: "/mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset for UAV Inspection/val/images"
-    labels: "/mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset for UAV Inspection/val/labels"
+    images: "/home/tongdat/semi-training/semi-yolo/datasets/labeled/valid/images"
+    labels: "/home/tongdat/semi-training/semi-yolo/datasets/labeled/valid/labels"
   
   # Output directory for checkpoints
   output_dir: "runs/ssod"
@@ -37,25 +37,25 @@ data:
 model:
   # Base YOLO model - can be: yolo11n.pt, yolo11s.pt, yolo11m.pt, yolo11l.pt, yolo11x.pt
   # Or path to custom pretrained weights
-  base_model: "/mnt/d/ThucTap/Al_platform_Solar/models/model_08e69871-1766083200_best.pt"
+  base_model: "/mnt/b2a3f3b6-becc-4d57-9ded-fd645e278857/semi-training/semi-yolo/model_96b0c9c6-1763634097_best.pt"
   
   # Number of classes in your dataset
-  num_classes: 1
+  num_classes: 8
   
   # Image size for training
   imgsz: 640
   
   # Class names (optional - will auto-generate if not defined)
   # Uncomment and modify for your dataset:
-  # class_names:
-  #   0: "hotspot"
-  #   1: "crack"
-  #   2: "diode_failure"
-  #   3: "shading"
-  #   4: "soiling"
-  #   5: "delamination"
-  #   6: "snail_trail"
-  #   7: "normal"
+  class_names:
+    0: 'MultiByPassed'
+    1: 'MultiDiode'
+    2: 'MultiHotSpot'
+    3: 'SingleByPassed'
+    4: 'SingleDiode' 
+    5: 'SingleHotSpot' 
+    6: 'StringOpenCircuit' 
+    7: 'StringReversedPolarity'
 
 # =============================================================================
 # TRAINING PARAMETERS
@@ -91,6 +91,11 @@ ssod:
   adaptive_threshold: true
   tau_min: 0.65
   tau_max: 0.80
+  
+  # Progressive threshold: starts low, increases over training
+  progressive_threshold: true
+  tau_start: 0.5              # Threshold at start of SSOD phase
+  tau_end: 0.75               # Threshold at end of training
   
   # NMS threshold for pseudo-labels
   nms_threshold: 0.5
