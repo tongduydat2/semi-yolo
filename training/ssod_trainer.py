@@ -503,6 +503,11 @@ class SSODTrainer:
             logger.info(f"Prepared {image_count} pseudo-labeled images in {pseudo_train_dir}")
             train_path = str(pseudo_images_dir.resolve())
             logger.info(f"Using pseudo-labeled data: {train_path}")
+            
+            # Delete old cache files to force YOLO to rescan
+            for cache_file in pseudo_train_dir.rglob("*.cache"):
+                cache_file.unlink()
+                logger.info(f"Deleted cache: {cache_file}")
         else:
             train_path = data_cfg['unlabeled']['images']
         
@@ -513,12 +518,18 @@ class SSODTrainer:
             # Fallback to auto-generated names
             class_names = {i: f'class_{i}' for i in range(model_cfg['num_classes'])}
         
+        # Use absolute paths to avoid confusion
+        val_path = str(Path(data_cfg['val']['images']).resolve()) if Path(data_cfg['val']['images']).exists() else data_cfg['val']['images']
+        
         data_yaml = {
             'path': '.',
             'train': train_path,
-            'val': data_cfg['val']['images'],
+            'val': val_path,
             'names': class_names
         }
+        
+        logger.info(f"Data YAML for {mode}: train={train_path}")
+        logger.info(f"Labels expected at: {str(Path(train_path).parent / 'labels')}")
         
         yaml_path = self.output_dir / f"{mode}_data.yaml"
         with open(yaml_path, 'w') as f:
