@@ -1,0 +1,7 @@
+names:
+  0: class_0
+path: .
+train: /mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset
+  for UAV Inspection/train/images
+val: /mnt/d/ThucTap/Al_platform_Solar/datasets/Thermal PV Panel Detection Dataset
+  for UAV Inspection/val/images
