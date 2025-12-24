@@ -327,8 +327,7 @@ class SSODTrainer:
         train_cfg = self.config['training']
         model_cfg = self.config['model']
         
-        # Check if using original labeled or fake_ironred
-        use_source = 'labeled' if self.skip_colorization else 'labeled'
+        run_name = f"supervised_epoch{epoch}"
         
         # Use YOLO's built-in training
         self.framework.get_student().train(
@@ -340,13 +339,23 @@ class SSODTrainer:
             verbose=False,
             exist_ok=True,
             project=str(self.output_dir),
-            name=f"supervised_epoch{epoch}"
+            name=run_name
         )
+        
+        # Load trained weights back into Student for next epoch
+        trained_weights = self.output_dir / run_name / "weights" / "last.pt"
+        if trained_weights.exists():
+            self.framework.update_student_weights(str(trained_weights))
+            logger.info(f"Loaded trained weights from: {trained_weights}")
+        else:
+            logger.warning(f"Trained weights not found: {trained_weights}")
         
     def _train_unsupervised(self, epoch: int):
         """Train Student on pseudo-labeled data."""
         train_cfg = self.config['training']
         model_cfg = self.config['model']
+        
+        run_name = f"unsupervised_epoch{epoch}"
         
         # Train on pseudo-labeled data
         self.framework.get_student().train(
@@ -358,8 +367,16 @@ class SSODTrainer:
             verbose=False,
             exist_ok=True,
             project=str(self.output_dir),
-            name=f"unsupervised_epoch{epoch}"
+            name=run_name
         )
+        
+        # Load trained weights back into Student
+        trained_weights = self.output_dir / run_name / "weights" / "last.pt"
+        if trained_weights.exists():
+            self.framework.update_student_weights(str(trained_weights))
+            logger.info(f"Loaded trained weights from: {trained_weights}")
+        else:
+            logger.warning(f"Trained weights not found: {trained_weights}")
         
     def _generate_pseudo_labels(self, unlabeled_dir: str, threshold: float = None) -> Dict:
         """Generate pseudo-labels using Teacher model with batch processing."""
@@ -432,6 +449,45 @@ class SSODTrainer:
             else:
                 train_path = data_cfg['fake_ironred']['images']
                 logger.info("Using fake IronRed data")
+        elif mode == 'pseudo':
+            # For pseudo-labeled data:
+            # Images are from unlabeled, but labels are from pseudo_labels directory
+            pseudo_label_dir = self.output_dir / "pseudo_labels"
+            unlabeled_images = data_cfg['unlabeled']['images']
+            
+            # Create symlinks or copy structure for YOLO to find both images and labels
+            pseudo_train_dir = self.output_dir / "pseudo_train"
+            pseudo_train_dir.mkdir(parents=True, exist_ok=True)
+            
+            images_link = pseudo_train_dir / "images"
+            labels_link = pseudo_train_dir / "labels"
+            
+            # Create symbolic links (or copy if symlink fails on Windows)
+            import shutil
+            
+            try:
+                # Remove old links/dirs if exist
+                if images_link.exists() or images_link.is_symlink():
+                    if images_link.is_symlink():
+                        images_link.unlink()
+                    else:
+                        shutil.rmtree(images_link)
+                if labels_link.exists() or labels_link.is_symlink():
+                    if labels_link.is_symlink():
+                        labels_link.unlink()
+                    else:
+                        shutil.rmtree(labels_link)
+                
+                # Create symlinks
+                images_link.symlink_to(Path(unlabeled_images).resolve())
+                labels_link.symlink_to(pseudo_label_dir.resolve())
+                logger.info(f"Created symlinks: images -> {unlabeled_images}, labels -> {pseudo_label_dir}")
+            except Exception as e:
+                logger.warning(f"Symlink failed ({e}), using direct paths")
+                # Fallback: just use paths directly (might not work on all systems)
+            
+            train_path = str(pseudo_train_dir / "images")
+            logger.info(f"Using pseudo-labeled data: {train_path}")
         else:
             train_path = data_cfg['unlabeled']['images']
         

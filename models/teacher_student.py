@@ -187,6 +187,28 @@ class TeacherStudentFramework:
         """Get Teacher model."""
         return self.teacher
     
+    def update_student_weights(self, weights_path: str):
+        """
+        Update Student model with new weights.
+        Used to load trained weights from previous epoch.
+        
+        Args:
+            weights_path: Path to trained weights (.pt file)
+        """
+        print(f"Updating Student weights from: {weights_path}")
+        
+        # Load the trained weights into Student model
+        self.student = YOLO(weights_path)
+        
+        # Update EMA updater to track new Student
+        self.ema_updater = EMAUpdater(
+            self.student.model,
+            decay=self.ema_decay
+        )
+        
+        # Also sync EMA with current Student state
+        self.ema_updater.model.load_state_dict(self.student.model.state_dict())
+    
     def export_student(self, path: str, format: str = "pt"):
         """Export trained Student model."""
         self.student.save(path)
