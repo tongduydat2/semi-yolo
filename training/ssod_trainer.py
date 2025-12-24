@@ -451,42 +451,57 @@ class SSODTrainer:
                 logger.info("Using fake IronRed data")
         elif mode == 'pseudo':
             # For pseudo-labeled data:
-            # Images are from unlabeled, but labels are from pseudo_labels directory
+            # Images are from unlabeled, labels are from pseudo_labels directory
+            # We need to create a proper YOLO structure
+            
             pseudo_label_dir = self.output_dir / "pseudo_labels"
-            unlabeled_images = data_cfg['unlabeled']['images']
+            unlabeled_images_path = Path(data_cfg['unlabeled']['images'])
             
-            # Create symlinks or copy structure for YOLO to find both images and labels
+            # Create pseudo_train directory with proper structure
             pseudo_train_dir = self.output_dir / "pseudo_train"
-            pseudo_train_dir.mkdir(parents=True, exist_ok=True)
+            pseudo_images_dir = pseudo_train_dir / "images"
+            pseudo_labels_dir = pseudo_train_dir / "labels"
             
-            images_link = pseudo_train_dir / "images"
-            labels_link = pseudo_train_dir / "labels"
+            pseudo_images_dir.mkdir(parents=True, exist_ok=True)
+            pseudo_labels_dir.mkdir(parents=True, exist_ok=True)
             
-            # Create symbolic links (or copy if symlink fails on Windows)
             import shutil
             
-            try:
-                # Remove old links/dirs if exist
-                if images_link.exists() or images_link.is_symlink():
-                    if images_link.is_symlink():
-                        images_link.unlink()
-                    else:
-                        shutil.rmtree(images_link)
-                if labels_link.exists() or labels_link.is_symlink():
-                    if labels_link.is_symlink():
-                        labels_link.unlink()
-                    else:
-                        shutil.rmtree(labels_link)
+            # Copy/link images that have pseudo-labels
+            image_count = 0
+            for label_file in pseudo_label_dir.glob("*.txt"):
+                # Find corresponding image
+                img_name = label_file.stem
                 
-                # Create symlinks
-                images_link.symlink_to(Path(unlabeled_images).resolve())
-                labels_link.symlink_to(pseudo_label_dir.resolve())
-                logger.info(f"Created symlinks: images -> {unlabeled_images}, labels -> {pseudo_label_dir}")
-            except Exception as e:
-                logger.warning(f"Symlink failed ({e}), using direct paths")
-                # Fallback: just use paths directly (might not work on all systems)
+                # Try common image extensions
+                src_img = None
+                for ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+                    candidate = unlabeled_images_path / f"{img_name}{ext}"
+                    if candidate.exists():
+                        src_img = candidate
+                        break
+                
+                if src_img:
+                    dst_img = pseudo_images_dir / src_img.name
+                    dst_label = pseudo_labels_dir / label_file.name
+                    
+                    # Create symlink or copy (symlink first, fallback to copy)
+                    try:
+                        if not dst_img.exists():
+                            dst_img.symlink_to(src_img.resolve())
+                        if not dst_label.exists():
+                            dst_label.symlink_to(label_file.resolve())
+                    except Exception:
+                        # Fallback to copy
+                        if not dst_img.exists():
+                            shutil.copy2(src_img, dst_img)
+                        if not dst_label.exists():
+                            shutil.copy2(label_file, dst_label)
+                    
+                    image_count += 1
             
-            train_path = str(pseudo_train_dir / "images")
+            logger.info(f"Prepared {image_count} pseudo-labeled images in {pseudo_train_dir}")
+            train_path = str(pseudo_images_dir.resolve())
             logger.info(f"Using pseudo-labeled data: {train_path}")
         else:
             train_path = data_cfg['unlabeled']['images']
