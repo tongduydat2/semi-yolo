@@ -209,7 +209,11 @@ class TeacherStudentFramework:
     def update_student_weights(self, weights_path: str):
         """
         Update Student model with new weights.
-        Teacher is kept separate and updated only via EMA.
+        Also reloads Teacher from same weights to maintain architecture consistency.
+        
+        CRITICAL: YOLO fuses BatchNorm into Conv layers during training.
+        If we don't reload Teacher, ~47% of weights cannot be updated via EMA
+        due to architecture mismatch, causing Teacher to fail at predictions.
         
         Args:
             weights_path: Path to trained weights (.pt file)
@@ -219,9 +223,13 @@ class TeacherStudentFramework:
         # Load the trained weights into Student model
         self.student = YOLO(weights_path)
         
-        # NOTE: Do NOT reload Teacher from same weights!
-        # Teacher should maintain its own EMA-accumulated knowledge.
-        # EMA update will happen in update_teacher() method.
+        # CRITICAL: Reload Teacher from same weights to match architecture
+        # This ensures 100% of keys can be updated via EMA
+        self.teacher = YOLO(weights_path)
+        
+        # Freeze Teacher gradients (Teacher never trains directly)
+        for param in self.teacher.model.parameters():
+            param.requires_grad_(False)
         
         # Recreate EMA updater to track new Student architecture
         self.ema_updater = EMAUpdater(
@@ -229,7 +237,76 @@ class TeacherStudentFramework:
             decay=self.ema_decay
         )
         
-        print(f"Student updated. Teacher will be updated via EMA.")
+        print(f"Student and Teacher updated from: {weights_path}")
+    
+    def save_teacher(self, path: str):
+        """
+        Save Teacher model to file.
+        This preserves EMA-accumulated knowledge across epochs.
+        
+        Args:
+            path: Path to save Teacher weights
+        """
+        self.teacher.save(path)
+        print(f"Teacher model saved to: {path}")
+    
+    def load_teacher(self, path: str) -> bool:
+        """
+        Load Teacher model from file.
+        
+        Args:
+            path: Path to saved Teacher weights
+            
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        from pathlib import Path
+        if Path(path).exists():
+            self.teacher = YOLO(path)
+            # Freeze Teacher gradients
+            for param in self.teacher.model.parameters():
+                param.requires_grad_(False)
+            print(f"Teacher model loaded from: {path}")
+            return True
+        return False
+    
+    def update_student_weights_preserve_teacher(self, weights_path: str, teacher_path: str = None):
+        """
+        Update Student model with new weights, preserving Teacher if saved.
+        
+        This method:
+        1. Loads new Student weights
+        2. Tries to load saved Teacher (preserves EMA knowledge)
+        3. Falls back to reload Teacher from Student weights if no saved Teacher
+        
+        Args:
+            weights_path: Path to trained Student weights
+            teacher_path: Path to saved Teacher weights (optional)
+        """
+        print(f"Updating Student weights from: {weights_path}")
+        
+        # Load the trained weights into Student model
+        self.student = YOLO(weights_path)
+        
+        # Try to load saved Teacher (preserves EMA knowledge)
+        teacher_loaded = False
+        if teacher_path:
+            teacher_loaded = self.load_teacher(teacher_path)
+        
+        # Fallback: reload Teacher from Student weights if no saved Teacher
+        if not teacher_loaded:
+            print("No saved Teacher found, reloading from Student weights...")
+            self.teacher = YOLO(weights_path)
+            for param in self.teacher.model.parameters():
+                param.requires_grad_(False)
+        
+        # Recreate EMA updater to track new Student architecture
+        self.ema_updater = EMAUpdater(
+            self.student.model,
+            decay=self.ema_decay
+        )
+        
+        print(f"Student updated. Teacher {'preserved' if teacher_loaded else 'reset'}.")
     
     def export_student(self, path: str, format: str = "pt"):
         """Export trained Student model."""
