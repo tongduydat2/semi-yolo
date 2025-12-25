@@ -205,7 +205,10 @@ class TeacherStudentFramework:
     def update_student_weights(self, weights_path: str):
         """
         Update Student model with new weights.
-        Used to load trained weights from previous epoch.
+        Also updates Teacher to maintain architecture consistency.
+        
+        When YOLO trains, it fuses BatchNorm into Conv layers.
+        Both Student and Teacher must have the same architecture.
         
         Args:
             weights_path: Path to trained weights (.pt file)
@@ -215,14 +218,24 @@ class TeacherStudentFramework:
         # Load the trained weights into Student model
         self.student = YOLO(weights_path)
         
-        # Update EMA updater to track new Student
+        # CRITICAL: Also reload Teacher from same weights to maintain same architecture
+        # This ensures Teacher has the same fused BN structure as Student
+        self.teacher = YOLO(weights_path)
+        
+        # Freeze Teacher gradients
+        for param in self.teacher.model.parameters():
+            param.requires_grad_(False)
+        
+        # Recreate EMA updater to track new Student architecture
         self.ema_updater = EMAUpdater(
             self.student.model,
             decay=self.ema_decay
         )
         
-        # Also sync EMA with current Student state
+        # Sync EMA with current Student state
         self.ema_updater.ema_model.load_state_dict(self.student.model.state_dict())
+        
+        print(f"Teacher also updated from: {weights_path}")
     
     def export_student(self, path: str, format: str = "pt"):
         """Export trained Student model."""
