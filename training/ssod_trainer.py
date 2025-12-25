@@ -454,6 +454,8 @@ class SSODTrainer:
             # Images are from unlabeled, labels are from pseudo_labels directory
             # We need to create a proper YOLO structure
             
+            import shutil
+            
             pseudo_label_dir = self.output_dir / "pseudo_labels"
             unlabeled_images_path = Path(data_cfg['unlabeled']['images'])
             
@@ -462,10 +464,19 @@ class SSODTrainer:
             pseudo_images_dir = pseudo_train_dir / "images"
             pseudo_labels_dir = pseudo_train_dir / "labels"
             
+            # AUTO-CLEANUP: Remove old pseudo_train to avoid stale symlinks/files
+            if pseudo_train_dir.exists():
+                shutil.rmtree(pseudo_train_dir)
+                logger.info(f"Cleaned up old pseudo_train directory")
+            
+            # AUTO-CLEANUP: Remove cache files in datasets dir
+            unlabeled_parent = unlabeled_images_path.parent
+            for cache_file in unlabeled_parent.glob("*.cache"):
+                cache_file.unlink()
+                logger.info(f"Deleted dataset cache: {cache_file}")
+            
             pseudo_images_dir.mkdir(parents=True, exist_ok=True)
             pseudo_labels_dir.mkdir(parents=True, exist_ok=True)
-            
-            import shutil
             
             # Copy/link images that have pseudo-labels
             image_count = 0
