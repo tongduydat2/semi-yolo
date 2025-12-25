@@ -310,10 +310,6 @@ class SSODTrainer:
             self.framework.update_teacher()
             logger.info("Teacher updated via EMA")
             
-            # === Save Teacher to preserve EMA knowledge ===
-            teacher_path = self.output_dir / "teacher_ema.pt"
-            self.framework.save_teacher(str(teacher_path))
-            
             # === Logging ===
             avg_losses = self.loss_calculator.get_average_losses(window=50)
             logger.info(f"Avg Losses - Sup: {avg_losses['supervised']:.4f}, "
@@ -357,12 +353,8 @@ class SSODTrainer:
         
         # Load trained weights back into Student for next epoch
         trained_weights = self.output_dir / run_name / "weights" / "last.pt"
-        teacher_path = self.output_dir / "teacher_ema.pt"
         if trained_weights.exists():
-            self.framework.update_student_weights_preserve_teacher(
-                str(trained_weights), 
-                str(teacher_path)
-            )
+            self.framework.update_student_weights(str(trained_weights))
             logger.info(f"Loaded trained weights from: {trained_weights}")
         else:
             logger.warning(f"Trained weights not found: {trained_weights}")
@@ -389,12 +381,8 @@ class SSODTrainer:
         
         # Load trained weights back into Student
         trained_weights = self.output_dir / run_name / "weights" / "last.pt"
-        teacher_path = self.output_dir / "teacher_ema.pt"
         if trained_weights.exists():
-            self.framework.update_student_weights_preserve_teacher(
-                str(trained_weights),
-                str(teacher_path)
-            )
+            self.framework.update_student_weights(str(trained_weights))
             logger.info(f"Loaded trained weights from: {trained_weights}")
         else:
             logger.warning(f"Trained weights not found: {trained_weights}")

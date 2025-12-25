@@ -1,6 +1,8 @@
 """
 Teacher-Student Framework for SSOD
 Implements Mean Teacher architecture with YOLOv11
+
+REFACTORED: Teacher model IS the EMA model (not separate copies)
 """
 
 import torch
@@ -8,17 +10,22 @@ import torch.nn as nn
 from ultralytics import YOLO
 from typing import Optional, Dict, Any, List
 from pathlib import Path
-
-from .ema import EMAUpdater
+from copy import deepcopy
 
 
 class TeacherStudentFramework:
     """
     Mean Teacher framework for Semi-Supervised Object Detection.
     
+    IMPORTANT: Teacher model is directly the EMA model, not a separate copy.
+    This ensures:
+    - No architecture mismatch between Student and Teacher
+    - EMA updates are directly reflected in pseudo-label generation
+    - No redundant model copies
+    
     Components:
-    - Student Model: Trained with backpropagation on labeled + pseudo-labeled data
-    - Teacher Model: Updated via EMA from Student, generates stable pseudo-labels
+    - Student Model: YOLO object, trained with backpropagation
+    - Teacher Model: EMA copy of Student's internal model, generates pseudo-labels
     """
     
     def __init__(self,
@@ -38,94 +45,128 @@ class TeacherStudentFramework:
         self.device = device
         self.ema_decay = ema_decay
         self.num_classes = num_classes
+        self.model_path = model_path
         
-        # Initialize Student model
+        # Initialize Student model (YOLO wrapper)
         print(f"Loading Student model from: {model_path}")
         self.student = YOLO(model_path)
         
-        # Initialize Teacher as copy of Student
-        print(f"Initializing Teacher model (EMA copy)...")
-        self.teacher = YOLO(model_path)
+        # Teacher IS the EMA model (direct reference, not separate YOLO object)
+        # This is the key change - we don't create a separate YOLO object
+        print(f"Initializing Teacher (EMA model)...")
+        self.teacher_model = self._create_ema_model(self.student.model)
         
-        # Freeze Teacher gradients
-        for param in self.teacher.model.parameters():
-            param.requires_grad_(False)
-            
-        # EMA updater for syncing Student -> Teacher
-        self.ema_updater = EMAUpdater(
-            self.student.model, 
-            decay=self.ema_decay
-        )
+        # EMA step counter (persistent across epochs)
+        self.ema_step = 0
+        self.warmup_steps = 100  # Warmup before EMA stabilizes
         
         print(f"Framework initialized on device: {device}")
         
+    def _create_ema_model(self, source_model: nn.Module) -> nn.Module:
+        """Create EMA model as deep copy of source."""
+        ema_model = deepcopy(source_model)
+        ema_model.eval()
+        for param in ema_model.parameters():
+            param.requires_grad_(False)
+        return ema_model
+    
+    @torch.no_grad()
     def update_teacher(self):
         """
         Update Teacher weights using EMA from Student.
-        W_T = alpha * W_T + (1 - alpha) * W_S
+        Formula: W_T = decay * W_T + (1 - decay) * W_S
         
-        Note: After YOLO training, BatchNorm may be fused into Conv layers,
-        causing state_dict mismatch. We rebuild Teacher from Student weights.
+        This updates the EMA model directly (no copy needed).
         """
-        # First update EMA model from Student
-        self.ema_updater.update(self.student.model)
+        self.ema_step += 1
         
-        # Rebuild Teacher from EMA weights safely
-        # Instead of load_state_dict (which fails on architecture mismatch),
-        # we copy matching parameters individually
-        ema_state = self.ema_updater.get_model().state_dict()
-        teacher_state = self.teacher.model.state_dict()
+        # Compute effective decay (gradual ramp up during warmup)
+        if self.ema_step <= self.warmup_steps:
+            # During warmup, use lower decay to learn faster
+            progress = self.ema_step / self.warmup_steps
+            decay = self.ema_decay * progress + 0.9 * (1 - progress)
+        else:
+            decay = self.ema_decay
         
-        # Copy only matching keys with matching shapes
-        updated_keys = 0
-        skipped_keys = 0
-        for key in teacher_state:
-            if key in ema_state and teacher_state[key].shape == ema_state[key].shape:
-                teacher_state[key] = ema_state[key]
-                updated_keys += 1
-            else:
-                skipped_keys += 1
+        student_params = dict(self.student.model.named_parameters())
+        teacher_params = dict(self.teacher_model.named_parameters())
         
-        # Load the updated state dict
-        self.teacher.model.load_state_dict(teacher_state)
-        print(f"EMA Teacher update: {updated_keys} keys updated, {skipped_keys} skipped")
+        updated_count = 0
+        for name in student_params:
+            if name in teacher_params:
+                teacher_params[name].data.mul_(decay).add_(
+                    student_params[name].data, alpha=1 - decay
+                )
+                updated_count += 1
+        
+        # Also update buffers (BatchNorm running stats)
+        student_buffers = dict(self.student.model.named_buffers())
+        teacher_buffers = dict(self.teacher_model.named_buffers())
+        
+        for name in student_buffers:
+            if name in teacher_buffers:
+                teacher_buffers[name].data.copy_(student_buffers[name].data)
+        
+        print(f"EMA Teacher update (step {self.ema_step}): {updated_count} params, decay={decay:.4f}")
         
     @torch.no_grad()
     def generate_pseudo_labels(self, 
                                images: List[str],
                                confidence_threshold: float = 0.75) -> List[Dict[str, Any]]:
         """
-        Generate pseudo-labels using Teacher model.
+        Generate pseudo-labels using Teacher (EMA) model.
+        
+        IMPORTANT: Uses self.teacher_model directly (not a YOLO wrapper).
+        This requires manual inference implementation.
         
         Args:
-            images: List of image paths or batch of images
+            images: List of image paths
             confidence_threshold: Minimum confidence to keep predictions (Tau)
             
         Returns:
             List of pseudo-labels for each image
         """
-        self.teacher.model.eval()
+        import cv2
+        import numpy as np
         
-        # Run Teacher inference
-        results = self.teacher.predict(
-            source=images,
-            conf=confidence_threshold,
-            verbose=False,
-            device=self.device
-        )
-        
+        self.teacher_model.eval()
         pseudo_labels = []
         
-        for result in results:
+        # Process images in batches
+        for img_path in images:
+            # Read and preprocess image
+            img = cv2.imread(str(img_path))
+            if img is None:
+                pseudo_labels.append({'boxes_yolo': [], 'classes': [], 'confidences': []})
+                continue
+                
+            orig_h, orig_w = img.shape[:2]
+            
+            # Use Student's YOLO wrapper for prediction on Teacher model
+            # Temporarily swap models
+            original_model = self.student.model
+            self.student.model = self.teacher_model
+            
+            try:
+                results = self.student.predict(
+                    source=img_path,
+                    conf=confidence_threshold,
+                    verbose=False,
+                    device=self.device
+                )
+            finally:
+                # Restore original Student model
+                self.student.model = original_model
+            
             labels = {
-                'boxes': [],
+                'boxes_yolo': [],
                 'classes': [],
                 'confidences': [],
-                'boxes_xyxy': [],
-                'boxes_yolo': []  # [class, x_center, y_center, w, h] normalized
+                'boxes_xyxy': []
             }
             
-            if result.boxes is not None and len(result.boxes) > 0:
+            if len(results) > 0 and results[0].boxes is not None:
+                result = results[0]
                 img_h, img_w = result.orig_shape
                 
                 for i in range(len(result.boxes)):
@@ -153,28 +194,53 @@ class TeacherStudentFramework:
     def train_mode(self):
         """Set Student to train mode, Teacher to eval mode."""
         self.student.model.train()
-        self.teacher.model.eval()
+        self.teacher_model.eval()
         
     def eval_mode(self):
         """Set both models to eval mode."""
         self.student.model.eval()
-        self.teacher.model.eval()
+        self.teacher_model.eval()
+    
+    def get_student(self) -> YOLO:
+        """Get Student YOLO model."""
+        return self.student
+    
+    def get_teacher_model(self) -> nn.Module:
+        """Get Teacher (EMA) model directly."""
+        return self.teacher_model
+    
+    def update_student_weights(self, weights_path: str):
+        """
+        Update Student model with new trained weights.
         
-    def save_checkpoint(self, 
-                        path: str, 
-                        epoch: int,
-                        optimizer: Optional[torch.optim.Optimizer] = None,
-                        extra_info: Optional[Dict] = None):
-        """Save training checkpoint."""
+        IMPORTANT: 
+        - Reload Student from weights
+        - Sync Teacher (EMA) model to match Student architecture
+        - EMA step counter is preserved (not reset)
+        
+        Args:
+            weights_path: Path to trained weights (.pt file)
+        """
+        print(f"Updating Student weights from: {weights_path}")
+        
+        # Load new Student weights
+        self.student = YOLO(weights_path)
+        
+        # Recreate Teacher (EMA) model from new Student
+        # This is necessary because YOLO fuses BatchNorm during training
+        self.teacher_model = self._create_ema_model(self.student.model)
+        
+        print(f"Student and Teacher (EMA) synced. EMA step: {self.ema_step}")
+    
+    def save_checkpoint(self, path: str, epoch: int, extra_info: Optional[Dict] = None):
+        """Save training checkpoint with both models and EMA state."""
         checkpoint = {
             'epoch': epoch,
             'student_state_dict': self.student.model.state_dict(),
-            'teacher_state_dict': self.teacher.model.state_dict(),
-            'ema_state_dict': self.ema_updater.state_dict()
+            'teacher_state_dict': self.teacher_model.state_dict(),
+            'ema_step': self.ema_step,
+            'ema_decay': self.ema_decay
         }
-        
-        if optimizer is not None:
-            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
         
         if extra_info:
             checkpoint.update(extra_info)
@@ -182,131 +248,31 @@ class TeacherStudentFramework:
         torch.save(checkpoint, path)
         print(f"Checkpoint saved to {path}")
         
-    def load_checkpoint(self, 
-                        path: str,
-                        optimizer: Optional[torch.optim.Optimizer] = None) -> int:
+    def load_checkpoint(self, path: str) -> int:
         """Load training checkpoint. Returns epoch number."""
         checkpoint = torch.load(path, map_location=self.device)
         
         self.student.model.load_state_dict(checkpoint['student_state_dict'])
-        self.teacher.model.load_state_dict(checkpoint['teacher_state_dict'])
-        self.ema_updater.load_state_dict(checkpoint['ema_state_dict'])
-        
-        if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.teacher_model.load_state_dict(checkpoint['teacher_state_dict'])
+        self.ema_step = checkpoint.get('ema_step', 0)
+        self.ema_decay = checkpoint.get('ema_decay', self.ema_decay)
             
-        print(f"Checkpoint loaded from {path}, epoch {checkpoint['epoch']}")
+        print(f"Checkpoint loaded from {path}, epoch {checkpoint['epoch']}, ema_step {self.ema_step}")
         return checkpoint['epoch']
     
-    def get_student(self) -> YOLO:
-        """Get Student model."""
-        return self.student
-    
-    def get_teacher(self) -> YOLO:
-        """Get Teacher model."""
-        return self.teacher
-    
-    def update_student_weights(self, weights_path: str):
-        """
-        Update Student model with new weights.
-        Also reloads Teacher from same weights to maintain architecture consistency.
-        
-        CRITICAL: YOLO fuses BatchNorm into Conv layers during training.
-        If we don't reload Teacher, ~47% of weights cannot be updated via EMA
-        due to architecture mismatch, causing Teacher to fail at predictions.
-        
-        Args:
-            weights_path: Path to trained weights (.pt file)
-        """
-        print(f"Updating Student weights from: {weights_path}")
-        
-        # Load the trained weights into Student model
-        self.student = YOLO(weights_path)
-        
-        # CRITICAL: Reload Teacher from same weights to match architecture
-        # This ensures 100% of keys can be updated via EMA
-        self.teacher = YOLO(weights_path)
-        
-        # Freeze Teacher gradients (Teacher never trains directly)
-        for param in self.teacher.model.parameters():
-            param.requires_grad_(False)
-        
-        # Recreate EMA updater to track new Student architecture
-        self.ema_updater = EMAUpdater(
-            self.student.model,
-            decay=self.ema_decay
-        )
-        
-        print(f"Student and Teacher updated from: {weights_path}")
-    
     def save_teacher(self, path: str):
-        """
-        Save Teacher model to file.
-        This preserves EMA-accumulated knowledge across epochs.
-        
-        Args:
-            path: Path to save Teacher weights
-        """
-        self.teacher.save(path)
+        """Save Teacher (EMA) model state dict."""
+        torch.save(self.teacher_model.state_dict(), path)
         print(f"Teacher model saved to: {path}")
     
     def load_teacher(self, path: str) -> bool:
-        """
-        Load Teacher model from file.
-        
-        Args:
-            path: Path to saved Teacher weights
-            
-        Returns:
-            True if loaded successfully, False otherwise
-        """
-        from pathlib import Path
+        """Load Teacher (EMA) model state dict."""
         if Path(path).exists():
-            self.teacher = YOLO(path)
-            # Freeze Teacher gradients
-            for param in self.teacher.model.parameters():
-                param.requires_grad_(False)
+            state_dict = torch.load(path, map_location=self.device)
+            self.teacher_model.load_state_dict(state_dict)
             print(f"Teacher model loaded from: {path}")
             return True
         return False
-    
-    def update_student_weights_preserve_teacher(self, weights_path: str, teacher_path: str = None):
-        """
-        Update Student model with new weights, preserving Teacher if saved.
-        
-        This method:
-        1. Loads new Student weights
-        2. Tries to load saved Teacher (preserves EMA knowledge)
-        3. Falls back to reload Teacher from Student weights if no saved Teacher
-        
-        Args:
-            weights_path: Path to trained Student weights
-            teacher_path: Path to saved Teacher weights (optional)
-        """
-        print(f"Updating Student weights from: {weights_path}")
-        
-        # Load the trained weights into Student model
-        self.student = YOLO(weights_path)
-        
-        # Try to load saved Teacher (preserves EMA knowledge)
-        teacher_loaded = False
-        if teacher_path:
-            teacher_loaded = self.load_teacher(teacher_path)
-        
-        # Fallback: reload Teacher from Student weights if no saved Teacher
-        if not teacher_loaded:
-            print("No saved Teacher found, reloading from Student weights...")
-            self.teacher = YOLO(weights_path)
-            for param in self.teacher.model.parameters():
-                param.requires_grad_(False)
-        
-        # Recreate EMA updater to track new Student architecture
-        self.ema_updater = EMAUpdater(
-            self.student.model,
-            decay=self.ema_decay
-        )
-        
-        print(f"Student updated. Teacher {'preserved' if teacher_loaded else 'reset'}.")
     
     def export_student(self, path: str, format: str = "pt"):
         """Export trained Student model."""
