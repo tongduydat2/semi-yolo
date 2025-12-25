@@ -266,8 +266,11 @@ class SSODTrainer:
         logger.info(f"Burn-in epochs: {burn_in_epochs} (supervised only)")
         logger.info(f"=" * 50)
         
-        # Get data paths
-        labeled_images = data_cfg['fake_ironred']['images']
+        # Get data paths - respect skip_colorization setting
+        if data_cfg.get('skip_colorization', False):
+            labeled_images = data_cfg['labeled']['images']
+        else:
+            labeled_images = data_cfg['fake_ironred']['images']
         unlabeled_images = data_cfg['unlabeled']['images']
         
         for epoch in range(self.current_epoch, max_epochs):
