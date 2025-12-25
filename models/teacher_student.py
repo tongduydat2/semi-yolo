@@ -63,13 +63,28 @@ class TeacherStudentFramework:
         """
         Update Teacher weights using EMA from Student.
         W_T = alpha * W_T + (1 - alpha) * W_S
+        
+        Note: After YOLO training, BatchNorm may be fused into Conv layers,
+        causing state_dict mismatch. We rebuild Teacher from Student weights.
         """
+        # First update EMA model from Student
         self.ema_updater.update(self.student.model)
         
-        # Sync EMA model to Teacher
-        self.teacher.model.load_state_dict(
-            self.ema_updater.get_model().state_dict()
-        )
+        # Rebuild Teacher from EMA weights safely
+        # Instead of load_state_dict (which fails on architecture mismatch),
+        # we copy matching parameters individually
+        ema_state = self.ema_updater.get_model().state_dict()
+        teacher_state = self.teacher.model.state_dict()
+        
+        # Copy only matching keys with matching shapes
+        updated_keys = 0
+        for key in teacher_state:
+            if key in ema_state and teacher_state[key].shape == ema_state[key].shape:
+                teacher_state[key] = ema_state[key]
+                updated_keys += 1
+        
+        # Load the updated state dict
+        self.teacher.model.load_state_dict(teacher_state)
         
     @torch.no_grad()
     def generate_pseudo_labels(self, 
