@@ -508,6 +508,16 @@ class SSODTrainer:
             for cache_file in pseudo_train_dir.rglob("*.cache"):
                 cache_file.unlink()
                 logger.info(f"Deleted cache: {cache_file}")
+            
+            # Also delete cache in unlabeled dir to prevent confusion
+            unlabeled_cache = Path(data_cfg['unlabeled']['images']).parent / "labels.cache"
+            if unlabeled_cache.exists():
+                unlabeled_cache.unlink()
+                logger.info(f"Deleted unlabeled cache: {unlabeled_cache}")
+            unlabeled_cache2 = Path(data_cfg['unlabeled']['images']).with_suffix('.cache')
+            if unlabeled_cache2.exists():
+                unlabeled_cache2.unlink()
+                logger.info(f"Deleted unlabeled cache: {unlabeled_cache2}")
         else:
             train_path = data_cfg['unlabeled']['images']
         
@@ -523,13 +533,13 @@ class SSODTrainer:
         
         data_yaml = {
             'path': '.',
-            'train': train_path,
+            'train': train_path,  # Use train_path consistently
             'val': val_path,
             'names': class_names
         }
         
-        logger.info(f"Data YAML for {mode}: train={train_path}")
-        logger.info(f"Labels expected at: {str(Path(train_path).parent / 'labels')}")
+        logger.info(f"Data YAML for {mode}: train={data_yaml['train']}")
+        logger.info(f"Labels expected at: {str(Path(data_yaml['train']).parent / 'labels')}")
         
         yaml_path = self.output_dir / f"{mode}_data.yaml"
         with open(yaml_path, 'w') as f:
