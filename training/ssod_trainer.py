@@ -76,20 +76,26 @@ class CleanupManager:
         for yaml_file in self.output_dir.glob("*_data.yaml"):
             yaml_file.unlink()
     
-    def cleanup_training_runs(self):
-        """Remove YOLO training run directories (logs, weights, etc.)."""
+    def cleanup_training_runs(self, keep_latest: int = 1):
+        """Remove YOLO training run directories, keeping the latest N."""
         patterns = ["supervised_epoch*", "unsupervised_epoch*"]
         for pattern in patterns:
-            for run_dir in self.output_dir.glob(pattern):
-                if run_dir.is_dir():
-                    shutil.rmtree(run_dir)
-                    logger.info(f"Removed training run: {run_dir.name}")
+            # Sort by modification time, newest first
+            run_dirs = sorted(
+                [d for d in self.output_dir.glob(pattern) if d.is_dir()],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
+            # Keep the latest N, remove the rest
+            for run_dir in run_dirs[keep_latest:]:
+                shutil.rmtree(run_dir)
+                logger.info(f"Removed old training run: {run_dir.name}")
                 
-    def run_epoch_cleanup(self):
+    def run_epoch_cleanup(self, keep_latest_runs: int = 2):
         """Run cleanup operations after each epoch."""
         self.cleanup_pseudo_labels()
         self.cleanup_temp_yaml()
-        self.cleanup_training_runs()
+        self.cleanup_training_runs(keep_latest=keep_latest_runs)
         
     def run_full_cleanup(self):
         """Run all cleanup operations including checkpoint pruning."""

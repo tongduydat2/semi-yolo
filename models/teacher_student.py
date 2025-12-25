@@ -78,13 +78,17 @@ class TeacherStudentFramework:
         
         # Copy only matching keys with matching shapes
         updated_keys = 0
+        skipped_keys = 0
         for key in teacher_state:
             if key in ema_state and teacher_state[key].shape == ema_state[key].shape:
                 teacher_state[key] = ema_state[key]
                 updated_keys += 1
+            else:
+                skipped_keys += 1
         
         # Load the updated state dict
         self.teacher.model.load_state_dict(teacher_state)
+        print(f"EMA Teacher update: {updated_keys} keys updated, {skipped_keys} skipped")
         
     @torch.no_grad()
     def generate_pseudo_labels(self, 
@@ -205,10 +209,7 @@ class TeacherStudentFramework:
     def update_student_weights(self, weights_path: str):
         """
         Update Student model with new weights.
-        Also updates Teacher to maintain architecture consistency.
-        
-        When YOLO trains, it fuses BatchNorm into Conv layers.
-        Both Student and Teacher must have the same architecture.
+        Teacher is kept separate and updated only via EMA.
         
         Args:
             weights_path: Path to trained weights (.pt file)
@@ -218,13 +219,9 @@ class TeacherStudentFramework:
         # Load the trained weights into Student model
         self.student = YOLO(weights_path)
         
-        # CRITICAL: Also reload Teacher from same weights to maintain same architecture
-        # This ensures Teacher has the same fused BN structure as Student
-        self.teacher = YOLO(weights_path)
-        
-        # Freeze Teacher gradients
-        for param in self.teacher.model.parameters():
-            param.requires_grad_(False)
+        # NOTE: Do NOT reload Teacher from same weights!
+        # Teacher should maintain its own EMA-accumulated knowledge.
+        # EMA update will happen in update_teacher() method.
         
         # Recreate EMA updater to track new Student architecture
         self.ema_updater = EMAUpdater(
@@ -232,10 +229,7 @@ class TeacherStudentFramework:
             decay=self.ema_decay
         )
         
-        # Sync EMA with current Student state
-        self.ema_updater.ema_model.load_state_dict(self.student.model.state_dict())
-        
-        print(f"Teacher also updated from: {weights_path}")
+        print(f"Student updated. Teacher will be updated via EMA.")
     
     def export_student(self, path: str, format: str = "pt"):
         """Export trained Student model."""
