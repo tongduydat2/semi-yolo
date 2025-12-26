@@ -54,21 +54,21 @@ class SSODTrainerV2:
             return yaml.safe_load(f)
     
     def _create_data_yaml(self, mode: str) -> str:
-        """Create temporary data.yaml for YOLO training."""
+        """Create temporary data.yaml for YOLO training with ABSOLUTE paths."""
         data_cfg = self.config['data']
         model_cfg = self.config['model']
         
         if mode == 'labeled':
             if data_cfg.get('skip_colorization', False):
-                train_path = data_cfg['labeled']['images']
+                train_path = Path(data_cfg['labeled']['images']).resolve()
             else:
-                train_path = data_cfg['fake_ironred']['images']
+                train_path = Path(data_cfg['fake_ironred']['images']).resolve()
         elif mode == 'pseudo':
-            train_path = str(self.output_dir / "pseudo_train" / "images")
+            train_path = (self.output_dir / "pseudo_train" / "images").resolve()
         else:
-            train_path = data_cfg['unlabeled']['images']
+            train_path = Path(data_cfg['unlabeled']['images']).resolve()
         
-        val_path = data_cfg['val']['images']
+        val_path = Path(data_cfg['val']['images']).resolve()
         
         # Class names
         if 'class_names' in model_cfg:
@@ -76,10 +76,10 @@ class SSODTrainerV2:
         else:
             class_names = {i: f'class_{i}' for i in range(model_cfg['num_classes'])}
         
+        # Use ABSOLUTE paths - no 'path' prefix
         data_yaml = {
-            'path': '.',
-            'train': train_path,
-            'val': val_path,
+            'train': str(train_path),
+            'val': str(val_path),
             'names': class_names
         }
         
