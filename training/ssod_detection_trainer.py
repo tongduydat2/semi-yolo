@@ -7,6 +7,7 @@ import torch
 from copy import deepcopy
 from pathlib import Path
 from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.cfg import get_cfg, DEFAULT_CFG
 
 
 class SSODDetectionTrainer(DetectionTrainer):
@@ -19,10 +20,7 @@ class SSODDetectionTrainer(DetectionTrainer):
     - Pseudo-label generation với Teacher
     """
     
-    def __init__(self, cfg=None, overrides=None, _callbacks=None):
-        # Ensure cfg is not None - use DEFAULT_CFG if None
-        if cfg is None:
-            cfg = {}
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
         super().__init__(cfg, overrides, _callbacks)
         
         # Teacher model (sẽ được init sau khi model sẵn sàng)
