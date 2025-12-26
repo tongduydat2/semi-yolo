@@ -34,10 +34,14 @@ class SSODDetectionTrainer(DetectionTrainer):
         # Teacher = copy của Student ban đầu
         print("Initializing Teacher model (EMA copy of Student)...")
         self.teacher = deepcopy(self.model)
+        
+        # Move Teacher to same device as Student
+        self.teacher = self.teacher.to(self.device)
+        
         self.teacher.eval()
         for p in self.teacher.parameters():
             p.requires_grad_(False)
-        print(f"Teacher initialized with {sum(p.numel() for p in self.teacher.parameters())} params")
+        print(f"Teacher initialized on device: {self.device}")
         
     def optimizer_step(self):
         """Override để add Teacher EMA update mỗi batch."""
