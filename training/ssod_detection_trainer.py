@@ -20,6 +20,9 @@ class SSODDetectionTrainer(DetectionTrainer):
     """
     
     def __init__(self, cfg=None, overrides=None, _callbacks=None):
+        # Ensure cfg is not None - use DEFAULT_CFG if None
+        if cfg is None:
+            cfg = {}
         super().__init__(cfg, overrides, _callbacks)
         
         # Teacher model (sẽ được init sau khi model sẵn sàng)
