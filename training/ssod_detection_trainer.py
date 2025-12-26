@@ -59,6 +59,14 @@ class SSODDetectionTrainer(DetectionTrainer):
         Called every optimizer step (every batch).
         """
         decay = self.teacher_ema_decay
+        
+        # Ensure Teacher is on same device as Student
+        student_device = next(self.model.parameters()).device
+        teacher_device = next(self.teacher.parameters()).device
+        
+        if teacher_device != student_device:
+            self.teacher = self.teacher.to(student_device)
+        
         for t_param, s_param in zip(
             self.teacher.parameters(), 
             self.model.parameters()
@@ -70,7 +78,10 @@ class SSODDetectionTrainer(DetectionTrainer):
             self.teacher.buffers(),
             self.model.buffers()
         ):
-            t_buf.data.copy_(s_buf.data)
+            if t_buf.device != s_buf.device:
+                t_buf.data.copy_(s_buf.data.to(t_buf.device))
+            else:
+                t_buf.data.copy_(s_buf.data)
     
     def generate_pseudo_labels(self, images_dir, output_dir, threshold=0.5):
         """
