@@ -111,6 +111,31 @@ class SSODTrainerV2:
         trainer = SSODDetectionTrainer(overrides=overrides)
         return trainer
     
+    def _create_pseudo_trainer(self) -> SSODDetectionTrainer:
+        """Create trainer for pseudo-labeled data training."""
+        model_cfg = self.config['model']
+        train_cfg = self.config['training']
+        
+        # Use latest weights from main trainer
+        latest_weights = self.output_dir / "ssod_run" / "weights" / "last.pt"
+        if not latest_weights.exists():
+            latest_weights = model_cfg['base_model']
+        
+        overrides = {
+            'model': str(latest_weights),
+            'data': self._create_data_yaml('pseudo'),
+            'epochs': 1,
+            'batch': train_cfg['batch_size'],
+            'imgsz': model_cfg['imgsz'],
+            'device': self.device,
+            'exist_ok': True,
+            'project': str(self.output_dir),
+            'name': 'pseudo_run',
+        }
+        
+        trainer = SSODDetectionTrainer(overrides=overrides)
+        return trainer
+    
     def _prepare_pseudo_dataset(self, pseudo_labels_dir: Path):
         """
         Prepare pseudo-labeled dataset for training.
@@ -214,12 +239,20 @@ class SSODTrainerV2:
                     # Prepare pseudo dataset
                     self._prepare_pseudo_dataset(pseudo_labels_dir)
                     
-                    # Set dataloader to pseudo data
-                    pseudo_yaml = self._create_data_yaml('pseudo')
-                    self.trainer.args.data = pseudo_yaml
+                    # Create NEW trainer for pseudo data (to force new dataloader)
+                    pseudo_trainer = self._create_pseudo_trainer()
+                    
+                    # Transfer Teacher model from main trainer to pseudo trainer
+                    pseudo_trainer.teacher = self.trainer.teacher
                     
                     # Train 1 epoch on pseudo data
-                    self.trainer.train()
+                    pseudo_trainer.train()
+                    
+                    # Transfer updated model back to main trainer
+                    self.trainer.model.load_state_dict(pseudo_trainer.model.state_dict())
+                    self.trainer.teacher = pseudo_trainer.teacher
+                    
+                    logger.info("Pseudo training completed, model synced back")
                 else:
                     logger.warning("Phase 3: Skipped - no pseudo-labels generated")
             
