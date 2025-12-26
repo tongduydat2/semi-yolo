@@ -299,7 +299,6 @@ class SSODTrainerV3:
                 exist_ok=True,
                 project=str(self.output_dir),
                 name=f"epoch_{epoch}",
-                resume=False if epoch == 0 else True  # Resume from previous
             )
             
             # Update Teacher via EMA
@@ -308,7 +307,13 @@ class SSODTrainerV3:
             # Load latest weights into Student for next iteration
             latest_weights = self.output_dir / f"epoch_{epoch}" / "weights" / "last.pt"
             if latest_weights.exists():
+                logger.info(f"Loading weights from: {latest_weights}")
                 self.student = YOLO(str(latest_weights))
+                # Also update Teacher to stay close to Student
+                self.teacher = YOLO(str(latest_weights))
+                for param in self.teacher.model.parameters():
+                    param.requires_grad_(False)
+                self.teacher.model.eval()
             
             # Cleanup
             pseudo_dir = self.output_dir / "pseudo_labels"
