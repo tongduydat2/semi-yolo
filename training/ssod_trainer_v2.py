@@ -224,8 +224,9 @@ class SSODTrainerV2:
                     logger.warning("Phase 3: Skipped - no pseudo-labels generated")
             
             # === Save Student model ===
+            import torch
             student_path = self.output_dir / f"student_epoch{epoch}.pt"
-            self.trainer.model.save(str(student_path))
+            torch.save(self.trainer.model.state_dict(), str(student_path))
             logger.info(f"Student saved to: {student_path}")
             
             # === Cleanup pseudo-labels ===
