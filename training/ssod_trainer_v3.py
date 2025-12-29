@@ -98,7 +98,14 @@ class SSODTrainerV3:
             
             for key in teacher_state:
                 if key in student_state and teacher_state[key].shape == student_state[key].shape:
-                    teacher_state[key] = decay * teacher_state[key] + (1 - decay) * student_state[key]
+                    # Ensure both tensors on same device
+                    s_tensor = student_state[key]
+                    t_tensor = teacher_state[key]
+                    
+                    if t_tensor.device != s_tensor.device:
+                        t_tensor = t_tensor.to(s_tensor.device)
+                    
+                    teacher_state[key] = decay * t_tensor + (1 - decay) * s_tensor
             
             self.teacher.model.load_state_dict(teacher_state)
         
