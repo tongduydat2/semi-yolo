@@ -1,0 +1,27 @@
+# Synthetic Defect Generation Configuration
+# ==========================================
+
+# Dataset 1: Panel images (input for OBB detection)
+panel_images: "datasets/resources/data/afd0e7cf-1766043451"
+
+# Dataset 2: Cell defect images (24x40 pixels)
+defect_images: "datasets/PVF-10"
+
+# Dataset 2 metadata JSON (contains class info)
+defect_metadata: "datasets/PVF-10/metadata.json"
+
+# Output directory for synthetic data
+output_dir: "./output"
+
+# Class distribution for generation (class_name: count)
+class_distribution:
+  Hot-Spot: 3000
+  Broken-Cell: 3000
+  # Bottom-Dirt: 3000
+  Shadow: 3000
+  Junction-Box-Heat: 3000
+  Debris-Cover: 3000
+  # Short-Circuit-Panel: 3000
+  # String-Short-Circuit: 15
+  Substring-Open-Circuit: 3000
+  # No-Anomaly: 15
