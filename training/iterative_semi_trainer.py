@@ -445,11 +445,19 @@ class IterativeSemiTrainer:
             5: 'Substring-Open-Circuit',
         })
         
-        val_path = self.config.get('val_images', train_dir / "images")
+        # Get val path - fallback to train if not exists
+        val_path = self.config.get('val_images', None)
+        
+        if val_path is None or not Path(val_path).exists():
+            # Use train as val (not ideal but allows training without separate val)
+            val_path = str(train_dir / "images")
+            logger.warning(f"No validation set found, using train data for validation")
+        else:
+            val_path = str(Path(val_path).resolve())
         
         data_yaml = {
             'train': str((train_dir / "images").resolve()),
-            'val': str(Path(val_path).resolve()),
+            'val': val_path,
             'names': class_names
         }
         
@@ -458,6 +466,7 @@ class IterativeSemiTrainer:
             yaml.dump(data_yaml, f)
         
         return str(yaml_path)
+
     
     def _train_model(self, data_yaml: str):
         """Train model for one iteration."""
