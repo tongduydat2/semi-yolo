@@ -97,10 +97,28 @@ def main():
         help='Path to test data directory'
     )
     
+    # === Iterative Semi-Training command ===
+    iterative_parser = subparsers.add_parser('iterative', 
+        help='Run iterative semi-training with PVF-10 synthetic data')
+    iterative_parser.add_argument(
+        '--config', '-c',
+        type=str,
+        default='config/iterative_config.yaml',
+        help='Path to iterative training config file'
+    )
+    iterative_parser.add_argument(
+        '--iterations', '-n',
+        type=int,
+        default=None,
+        help='Max iterations (override config)'
+    )
+    
     args = parser.parse_args()
     
     if args.command == 'train':
         run_training(args)
+    elif args.command == 'iterative':
+        run_iterative_training(args)
     elif args.command == 'colorize':
         run_colorization(args)
     elif args.command == 'analyze':
@@ -125,6 +143,19 @@ def run_training(args):
         trainer.resume(args.resume)
     
     trainer.train()
+
+
+def run_iterative_training(args):
+    """Run iterative semi-training with PVF-10 synthetic data."""
+    from training.iterative_semi_trainer import IterativeSemiTrainer
+    
+    print("=" * 60)
+    print("ITERATIVE SEMI-TRAINING")
+    print("With PVF-10 Synthetic Data Anchor")
+    print("=" * 60)
+    
+    trainer = IterativeSemiTrainer(args.config)
+    trainer.train(max_iterations=args.iterations)
 
 
 def run_colorization(args):
