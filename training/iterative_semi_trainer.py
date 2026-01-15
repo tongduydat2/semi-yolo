@@ -499,13 +499,24 @@ class IterativeSemiTrainer:
         unlabeled_dir = Path(self.config['unlabeled_images'])
         threshold = self.config['pseudo_label_threshold']
         
+        # Load previously labeled images to skip
+        labeled_tracking_file = self.output_dir / "labeled_images.txt"
+        labeled_set = set()
+        if labeled_tracking_file.exists():
+            with open(labeled_tracking_file, 'r') as f:
+                labeled_set = set(line.strip() for line in f)
+        
         image_files = list(unlabeled_dir.glob("*.jpg")) + \
                      list(unlabeled_dir.glob("*.png")) + \
                      list(unlabeled_dir.glob("*.JPG"))
         
+        # Filter out already labeled
+        image_files = [f for f in image_files if f.name not in labeled_set]
+        
         logger.info(f"Predicting on {len(image_files)} unlabeled images...")
         
         n_labeled = 0
+        newly_labeled = []
         
         for img_path in tqdm(image_files, desc="Pseudo-labeling"):
             # Get consistent predictions
@@ -545,10 +556,15 @@ class IterativeSemiTrainer:
             with open(label_file, 'w') as f:
                 f.write('\n'.join(labels))
             
-            # Remove from unlabeled
-            img_path.unlink()
+            # Track labeled image (instead of deleting)
+            newly_labeled.append(img_path.name)
             
             n_labeled += 1
+        
+        # Update tracking file
+        with open(labeled_tracking_file, 'a') as f:
+            for name in newly_labeled:
+                f.write(f"{name}\n")
         
         return n_labeled, len(image_files)
     
