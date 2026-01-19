@@ -1,0 +1,60 @@
+# Semi-YOLOv11 Default Configuration
+
+# Base model
+model: yolo11n.pt
+
+# Standard training parameters
+imgsz: 640
+batch: 8
+epochs: 50
+workers: 8
+
+# Data - point to YAML config file
+data: config/data.yaml
+
+# Semi-supervised specific settings
+semi:
+  # Data paths
+  labeled_path: /mnt/d/ThucTap/Al_platform_Solar/datasets/resources/data/eval_yolo
+  unlabeled_path: /mnt/d/ThucTap/Al_platform_Solar/datasets/resources/data/eval_yolo
+
+  # Training phases
+  burn_in: 10              # Epochs to train on labeled only
+  lambda_unsup: 1.0       # Weight for unsupervised loss
+  lambda_warmup: 5        # Epochs to warmup lambda_unsup
+
+  # EMA teacher
+  ema_decay: 0.999
+
+  # Pseudo-label filters (chain applied sequentially)
+  filters:
+    - name: dsat
+      params:
+        num_classes: 5
+        initial_threshold: 0.5
+        momentum: 0.99
+    - name: dfl_entropy
+      params:
+        threshold: 0.5
+    - name: tal_alignment
+      params:
+        threshold: 0.3
+        alpha: 0.5
+        beta: 6.0
+
+# Augmentation (uses Ultralytics defaults, can override)
+augment:
+  weak:
+    mosaic: 0.0
+    mixup: 0.0
+    fliplr: 0.5
+    scale: 0.2
+  strong:
+    mosaic: 1.0
+    mixup: 0.5
+    hsv_h: 0.015
+    hsv_s: 0.7
+    hsv_v: 0.4
+    fliplr: 0.5
+    scale: 0.5
+    erasing: 0.3
