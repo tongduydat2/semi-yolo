@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, List
 import torch
 from torch import Tensor
 
@@ -15,17 +15,14 @@ class BaseFilter(ABC):
         """
         Filter predictions and return mask and scores.
 
-        Args:
-            predictions: Dict containing 'boxes', 'cls_scores', etc.
-
         Returns:
             mask: Boolean tensor indicating which predictions to keep
-            scores: Confidence/quality scores for kept predictions
+            scores: Confidence scores for predictions
         """
         pass
 
     def update(self, epoch: int, total_epochs: int):
-        """Update internal state (e.g., thresholds). Override if needed."""
+        """Update internal state. Override if needed."""
         pass
 
     def reset(self):
@@ -39,57 +36,34 @@ class FilterChain:
     def __init__(self, filters: List[BaseFilter]):
         self.filters = filters
 
-    def __call__(self, predictions: Dict[str, Tensor], **kwargs) -> Dict[str, Tensor]:
-        """
-        Apply all filters sequentially.
-
-        Args:
-            predictions: Dict with 'boxes', 'cls_scores', 'box_dist', 'iou_pred'
-
-        Returns:
-            Filtered predictions dict with 'boxes', 'labels', 'scores', 'stats'
-        """
+    def __call__(self, predictions: Dict[str, Tensor], **kwargs) -> Tuple[Tensor, Tensor]:
+        """Apply all filters sequentially. Returns (mask, filtered_scores)."""
         if len(predictions.get('boxes', [])) == 0:
-            return {
-                'boxes': torch.empty(0, 4),
-                'labels': torch.empty(0, dtype=torch.long),
-                'scores': torch.empty(0),
-                'stats': {'total': 0, 'final': 0}
-            }
+            return torch.zeros(0, dtype=torch.bool), torch.zeros(0)
 
         device = predictions['boxes'].device
         combined_mask = torch.ones(len(predictions['boxes']), dtype=torch.bool, device=device)
-        combined_scores = torch.ones(len(predictions['boxes']), device=device)
-        stats = {'total': len(predictions['boxes'])}
 
-        for i, f in enumerate(self.filters):
-            mask, scores = f(predictions)
-            mask = mask.to(device)
-            scores = scores.to(device)
-            combined_mask &= mask
-            combined_scores *= scores
-            stats[f'after_{f.__class__.__name__}'] = combined_mask.sum().item()
+        for f in self.filters:
+            mask, _ = f(predictions)
+            combined_mask &= mask.to(device)
 
         cls_scores = predictions['cls_scores']
-        cls_max, cls_idx = cls_scores.max(dim=-1)
+        if cls_scores.dim() == 1:
+            cls_max = cls_scores
+        else:
+            cls_max = cls_scores.max(dim=-1).values
 
-        stats['final'] = combined_mask.sum().item()
-
-        return {
-            'boxes': predictions['boxes'][combined_mask],
-            'labels': cls_idx[combined_mask],
-            'scores': cls_max[combined_mask],
-            'stats': stats
-        }
+        return combined_mask, cls_max[combined_mask]
 
     def update(self, epoch: int, total_epochs: int):
         """Update all filters."""
         for f in self.filters:
             f.update(epoch, total_epochs)
 
-    def add_filter(self, filter: BaseFilter):
-        """Add a filter to the chain."""
-        self.filters.append(filter)
+    def __repr__(self):
+        filters_str = ", ".join([repr(f) for f in self.filters])
+        return f"FilterChain([{filters_str}])"
 
 
 FILTER_REGISTRY: Dict[str, type] = {}
@@ -111,13 +85,7 @@ def get_filter(name: str, **kwargs) -> BaseFilter:
 
 
 def build_filter_chain(config: List[Dict[str, Any]]) -> FilterChain:
-    """
-    Build FilterChain from config.
-
-    Args:
-        config: List of dicts with 'name' and 'params' keys
-            Example: [{'name': 'dsat', 'params': {'num_classes': 80}}]
-    """
+    """Build FilterChain from config list."""
     filters = []
     for item in config:
         name = item['name']

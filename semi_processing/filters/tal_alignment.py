@@ -34,8 +34,8 @@ class TALAlignmentFilter(BaseFilter):
 
         Args:
             predictions: Dict with:
-                - 'cls_scores': [N, num_classes]
-                - 'iou_pred': [N] predicted IoU scores
+                - 'cls_scores': [N, num_classes] or [N] (1D already max)
+                - 'iou_pred': [N] predicted IoU scores (optional)
 
         Returns:
             mask: Boolean tensor [N]
@@ -44,7 +44,10 @@ class TALAlignmentFilter(BaseFilter):
         cls_scores = predictions['cls_scores']
         iou_pred = predictions.get('iou_pred')
 
-        cls_max = cls_scores.max(dim=-1).values
+        if cls_scores.dim() == 1:
+            cls_max = cls_scores
+        else:
+            cls_max = cls_scores.max(dim=-1).values
 
         if iou_pred is None:
             alignment = cls_max ** self.alpha
@@ -59,3 +62,6 @@ class TALAlignmentFilter(BaseFilter):
     def update(self, epoch: int, total_epochs: int):
         """Optionally adjust threshold based on training progress."""
         pass
+
+    def __repr__(self):
+        return f"TALAlignmentFilter(threshold={self.threshold}, alpha={self.alpha}, beta={self.beta})"

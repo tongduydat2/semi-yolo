@@ -71,3 +71,6 @@ class DFLEntropyFilter(BaseFilter):
     def update(self, epoch: int, total_epochs: int):
         """Optionally adjust threshold based on training progress."""
         pass
+    
+    def __repr__(self):
+        return f"DFLEntropyFilter(threshold={self.threshold}, num_bins={self.num_bins})"
