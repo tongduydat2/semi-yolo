@@ -84,6 +84,12 @@ class SemiTrainer(DetectionTrainer):
             schedule=self.lambda_bg_schedule,
             burn_in_epochs=self.burn_in_epochs,
         )
+        
+        # Layer freezing configuration
+        self.freeze_cfg = self.semi_cfg.get('freeze', {})
+        self.freeze_enabled = self.freeze_cfg.get('enabled', False)
+        self.freeze_backbone = self.freeze_cfg.get('freeze_backbone', False)
+        self.freeze_layers = self.freeze_cfg.get('freeze_layers', [])
 
         self.teacher = None
         self.filter_chain = None
@@ -126,6 +132,10 @@ class SemiTrainer(DetectionTrainer):
         ])
         self.filter_chain = build_filter_chain(filter_config)
         LOGGER.info(colorstr('Semi-SSL: ') + f'Filter chain: {[f.__class__.__name__ for f in self.filter_chain.filters]}')
+        
+        # Freeze layers if configured
+        self._freeze_layers()
+
 
     def _init_semi_data(self):
         """Initialize semi-supervised data module."""
@@ -574,3 +584,71 @@ class SemiTrainer(DetectionTrainer):
                     shutil.copy2(weights_dir / 'last.pt', last_semi_path)
                     LOGGER.info(colorstr('Semi-SSL: ') + 
                                f'Saved last semi checkpoint (epoch={epoch}) → {last_semi_path}')
+
+    def _freeze_layers(self):
+        """Freeze specified layers by setting requires_grad=False.
+        
+        YOLO model structure (typical YOLOv11n):
+        - Layers 0-9: Backbone (CSPDarknet)
+        - Layers 10-15: Neck (PAN-FPN)
+        - Layer 16+: Head (Detect)
+        """
+        if not self.freeze_enabled:
+            return
+        
+        frozen_count = 0
+        total_params = 0
+        frozen_params = 0
+        
+        # Freeze backbone if requested
+        if self.freeze_backbone:
+            # Backbone is typically first 10 layers in YOLOv11
+            backbone_layers = 10
+            for i in range(min(backbone_layers, len(self.model.model))):
+                for param in self.model.model[i].parameters():
+                    if param.requires_grad:  # Only freeze if not already frozen
+                        param.requires_grad = False
+                        frozen_params += param.numel()
+                frozen_count += 1
+            LOGGER.info(colorstr('Freeze: ') + f'Froze backbone (layers 0-{min(backbone_layers, len(self.model.model))-1})')
+        
+        # Freeze specific layers
+        if self.freeze_layers:
+            layers_to_freeze = set()  # Use set to avoid duplicates
+            
+            for layer_spec in self.freeze_layers:
+                if isinstance(layer_spec, int):
+                    # Single layer
+                    layers_to_freeze.add(layer_spec)
+                elif isinstance(layer_spec, str) and '-' in layer_spec:
+                    # Range (e.g., "0-5")
+                    try:
+                        start, end = map(int, layer_spec.split('-'))
+                        layers_to_freeze.update(range(start, end + 1))
+                    except ValueError:
+                        LOGGER.warning(f'Invalid layer range spec: {layer_spec}')
+            
+            # Apply freezing
+            additional_frozen = 0
+            for layer_idx in sorted(layers_to_freeze):
+                if layer_idx < len(self.model.model):
+                    for param in self.model.model[layer_idx].parameters():
+                        if param.requires_grad:
+                            param.requires_grad = False
+                            frozen_params += param.numel()
+                    additional_frozen += 1
+                else:
+                    LOGGER.warning(f'Layer {layer_idx} does not exist (model has {len(self.model.model)} layers)')
+            
+            if additional_frozen > 0:
+                LOGGER.info(colorstr('Freeze: ') + 
+                           f'Froze {additional_frozen} additional layers: {sorted(layers_to_freeze)}')
+        
+        # Count total parameters
+        for param in self.model.parameters():
+            total_params += param.numel()
+        
+        if frozen_count > 0 or len(self.freeze_layers) > 0:
+            frozen_pct = 100.0 * frozen_params / total_params if total_params > 0 else 0.0
+            LOGGER.info(colorstr('Freeze: ') + 
+                       f'Total: {frozen_params:,} / {total_params:,} params frozen ({frozen_pct:.1f}%)')
