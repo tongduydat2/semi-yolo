@@ -457,9 +457,21 @@ class SemiTrainer(DetectionTrainer):
             # Get predictions on weak augmentation (no gradient)
             with torch.no_grad():
                 preds_weak = self.model(batch_u_weak['img'])
-                if isinstance(preds_weak, (list, tuple)):
+                # Model returns (predictions, loss) tuple or just predictions
+                if isinstance(preds_weak, tuple):
                     preds_weak = preds_weak[0]
-                scores_weak = preds_weak['scores'].sigmoid()  # (B, N, C)
+                
+                # preds_weak is a list of predictions at different scales
+                # We use the first one (main prediction head)
+                if isinstance(preds_weak, (list, tuple)):
+                    pred_weak = preds_weak[0]
+                else:
+                    pred_weak = preds_weak
+                
+                # pred_weak shape: (B, num_anchors, 4+num_classes)
+                # Extract class scores (last num_classes channels)
+                num_classes = self.model.nc
+                scores_weak = pred_weak[..., 4:4+num_classes].sigmoid()  # (B, N, C)
                 
                 # Check confidence gating
                 max_conf = scores_weak.max(dim=-1)[0].max(dim=-1)[0]  # (B,)
@@ -467,9 +479,15 @@ class SemiTrainer(DetectionTrainer):
             
             # Get predictions on strong augmentation (with gradient)
             preds_strong = self.model(batch_u_strong['img'])
-            if isinstance(preds_strong, (list, tuple)):
+            if isinstance(preds_strong, tuple):
                 preds_strong = preds_strong[0]
-            scores_strong = preds_strong['scores'].sigmoid()  # (B, N, C)
+            
+            if isinstance(preds_strong, (list, tuple)):
+                pred_strong = preds_strong[0]
+            else:
+                pred_strong = preds_strong
+            
+            scores_strong = pred_strong[..., 4:4+num_classes].sigmoid()  # (B, N, C)
             
             # Flatten spatial dimensions for vectorized cosine similarity
             # (B, N, C) → (B, N*C)
