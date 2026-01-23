@@ -1,8 +1,8 @@
 task: detect
 mode: train
-model: yolo11n.pt
+model: /mnt/d/ThucTap/Al_platform_Solar/semi_model/semi_processing/runs/semi/exp9/weights/best.pt
 data: config/data.yaml
-epochs: 50
+epochs: 100
 time: null
 patience: 100
 batch: 8

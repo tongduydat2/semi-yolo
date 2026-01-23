@@ -1,13 +1,13 @@
 # Semi-YOLOv11 Default Configuration
 
 # Base model
-model: yolo11n.pt
+model: /mnt/d/ThucTap/Al_platform_Solar/semi_model/semi_processing/runs/semi/exp/weights/best.pt
 
 # Standard training parameters
 imgsz: 640
 batch: 8
-epochs: 50
-workers: 8
+epochs: 100
+workers: 4
 
 # Data - point to YAML config file
 data: config/data.yaml
@@ -16,12 +16,11 @@ data: config/data.yaml
 semi:
   # Data paths
   labeled_path: /mnt/d/ThucTap/Al_platform_Solar/datasets/resources/data/eval_yolo
-  unlabeled_path: /mnt/d/ThucTap/Al_platform_Solar/datasets/resources/data/eval_yolo
-
+  unlabeled_path: /mnt/d/ThucTap/Al_platform_Solar/pseudo_dataset_PV/frames
   # Training phases
-  burn_in: 10              # Epochs to train on labeled only
-  lambda_unsup: 1.0       # Weight for unsupervised loss
-  lambda_warmup: 5        # Epochs to warmup lambda_unsup
+  burn_in: 5             # Epochs to train on labeled only
+  lambda_unsup: 0.5       # Weight for unsupervised loss (lowered for stability)
+  lambda_warmup: 5       # Epochs to warmup lambda_unsup (increased for stability)
 
   # EMA teacher
   ema_decay: 0.999
@@ -31,16 +30,31 @@ semi:
     - name: dsat
       params:
         num_classes: 5
-        initial_threshold: 0.5
+        initial_threshold: 0.2
         momentum: 0.99
-    - name: dfl_entropy
-      params:
-        threshold: 0.5
-    - name: tal_alignment
-      params:
-        threshold: 0.3
-        alpha: 0.5
-        beta: 6.0
+    # - name: dfl_entropy
+    #   params:
+    #     threshold: 0.5
+    # - name: tal_alignment
+    #   params:
+    #     threshold: 0.3
+    #     alpha: 0.5
+    #     beta: 6.0
+  lambda_bg: 1.0                 # Background penalty weight
+                                 # - 0.0: No penalty (standard training)
+                                 # - 0.5-1.0: Moderate (recommended start)
+                                 # - 1.0-2.0: Strong (noisy pseudo-labels)
+                                 # - >2.0: Very aggressive
+  
+  lambda_bg_warmup: 5            # Warmup epochs for background penalty
+                                 # Gradually increase from 0 to lambda_bg
+  
+  lambda_bg_schedule: 'linear'   # Schedule type for background penalty
+                                 # Options: 'constant', 'linear', 'step', 'cosine'
+  
+  use_focal_bg: false            # Use focal loss style for background penalty
+                                 # - false: Simple max penalty (faster)
+                                 # - true: Focal-style (focuses on hard negatives)
 
 # Augmentation (uses Ultralytics defaults, can override)
 augment:
@@ -52,9 +66,9 @@ augment:
   strong:
     mosaic: 1.0
     mixup: 0.5
-    hsv_h: 0.015
-    hsv_s: 0.7
-    hsv_v: 0.4
+    hsv_h: 0
+    hsv_s: 0
+    hsv_v: 0
     fliplr: 0.5
     scale: 0.5
-    erasing: 0.3
+    erasing: 0

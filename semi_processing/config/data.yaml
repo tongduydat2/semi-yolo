@@ -4,4 +4,9 @@ train: /mnt/d/ThucTap/Al_platform_Solar/datasets/resources/data/eval_yolo/images
 val: /mnt/d/ThucTap/Al_platform_Solar/datasets/resources/data/eval_yolo/images
 
 nc: 5
-names: ['class0', 'class1', 'class2', 'class3', 'class4']
+names: 
+  0: 09hot cell
+  1: 07break
+  2: 05shadow
+  3: 03string short circuit
+  4: 01substring open circuit

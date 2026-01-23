@@ -91,6 +91,10 @@ class SemiTrainer(DetectionTrainer):
 
         self.in_burn_in = True
         
+        # Phase-specific checkpoint tracking
+        self.best_fitness_burnin = 0.0  # Best fitness during burn-in
+        self.best_fitness_semi = 0.0     # Best fitness during semi-supervised
+        
         LOGGER.info(colorstr('Semi-SSL: ') + f'Weak aug: mosaic={self.weak_aug.get("mosaic")}, mixup={self.weak_aug.get("mixup")}')
         LOGGER.info(colorstr('Semi-SSL: ') + f'Strong aug: mosaic={self.strong_aug.get("mosaic")}, mixup={self.strong_aug.get("mixup")}')
         LOGGER.info(colorstr('Semi-SSL: ') + 
@@ -207,8 +211,17 @@ class SemiTrainer(DetectionTrainer):
             if not self.in_burn_in:
                 self._update_dsat_from_metrics()
             
+            
             # [FIX LOOP] Lặp theo số batch của Unlabeled Data
-            pbar = tqdm(range(nb), total=nb, bar_format='{l_bar}{bar:10}{r_bar}')
+            # Xác định số iterations tối đa cho epoch này
+            if self.in_burn_in:
+                # Burn-in: chỉ lặp qua labeled data
+                max_iters = len(self.train_loader)
+            else:
+                # Semi-supervised: lặp qua unlabeled data (lớn hơn)
+                max_iters = nb
+                
+            pbar = tqdm(range(max_iters), total=max_iters, bar_format='{l_bar}{bar:10}{r_bar}')
             self.tloss = None
 
             for i in pbar:
@@ -287,9 +300,6 @@ class SemiTrainer(DetectionTrainer):
                     lambda_bg=f'{current_lambda_bg:.2f}',
                     total_boxes=f'{total_boxes:.2f}' if not self.in_burn_in else '-',
                 )
-                pbar.update(nb//len(self.train_loader))
-                if i > len(self.train_loader) and self.in_burn_in:
-                    break
                 
             # End Batch Loop
             pbar.close()
@@ -311,6 +321,9 @@ class SemiTrainer(DetectionTrainer):
                 self.metrics, self.fitness = self.validate()
                 self.save_model()
                 self.run_callbacks('on_model_save')
+                
+                # Phase-specific checkpoint saving
+                self._save_phase_checkpoints(epoch, final)
 
         self.run_callbacks('on_train_end')
 
@@ -508,3 +521,56 @@ class SemiTrainer(DetectionTrainer):
             LOGGER.warning(f'Could not extract per-class F1: {e}')
         
         return None
+
+    def _save_phase_checkpoints(self, epoch: int, is_final: bool):
+        """Save phase-specific checkpoints (best/last for burn-in and semi phases).
+        
+        Args:
+            epoch: Current epoch number
+            is_final: Whether this is the final epoch
+        """
+        import shutil
+        from pathlib import Path
+        
+        weights_dir = Path(self.save_dir) / 'weights'
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        
+        current_fitness = float(self.fitness) if self.fitness else 0.0
+        
+        # Burn-in phase (epochs 0 to burn_in_epochs-1)
+        if self.in_burn_in:
+            # 1. Best in burn-in
+            if current_fitness > self.best_fitness_burnin:
+                self.best_fitness_burnin = current_fitness
+                best_burnin_path = weights_dir / 'best_burnin.pt'
+                if (weights_dir / 'last.pt').exists():
+                    shutil.copy2(weights_dir / 'last.pt', best_burnin_path)
+                    LOGGER.info(colorstr('Semi-SSL: ') + 
+                               f'Saved best burn-in checkpoint (fitness={current_fitness:.4f}) → {best_burnin_path}')
+            
+            # 2. Last in burn-in (save at end of burn-in phase)
+            if epoch == self.burn_in_epochs - 1:
+                last_burnin_path = weights_dir / 'last_burnin.pt'
+                if (weights_dir / 'last.pt').exists():
+                    shutil.copy2(weights_dir / 'last.pt', last_burnin_path)
+                    LOGGER.info(colorstr('Semi-SSL: ') + 
+                               f'Saved last burn-in checkpoint (epoch={epoch}) → {last_burnin_path}')
+                    
+        # Semi-supervised phase (epochs burn_in_epochs to end)
+        else:
+            # 3. Best in semi
+            if current_fitness > self.best_fitness_semi:
+                self.best_fitness_semi = current_fitness
+                best_semi_path = weights_dir / 'best_semi.pt'
+                if (weights_dir / 'last.pt').exists():
+                    shutil.copy2(weights_dir / 'last.pt', best_semi_path)
+                    LOGGER.info(colorstr('Semi-SSL: ') + 
+                               f'Saved best semi checkpoint (fitness={current_fitness:.4f}) → {best_semi_path}')
+            
+            # 4. Last in semi (save at final epoch)
+            if is_final:
+                last_semi_path = weights_dir / 'last_semi.pt'
+                if (weights_dir / 'last.pt').exists():
+                    shutil.copy2(weights_dir / 'last.pt', last_semi_path)
+                    LOGGER.info(colorstr('Semi-SSL: ') + 
+                               f'Saved last semi checkpoint (epoch={epoch}) → {last_semi_path}')
