@@ -28,7 +28,11 @@ from filters.dsat import DSATFilter
 from validators.dsat_validator import DSATValidator
 from ultralytics.utils import TQDM
 from data.semi_dataset import ThermalAugmentation
-
+from tqdm import tqdm
+from losses.bg_penalty_loss import (
+    v8DetectionLossWithBgPenalty,
+    AdaptiveBgPenaltyScheduler
+)
 class SemiTrainer(DetectionTrainer):
     """
     Semi-Supervised Trainer extending Ultralytics DetectionTrainer.
@@ -48,7 +52,7 @@ class SemiTrainer(DetectionTrainer):
         
         self.weak_aug = merge_aug_config(WEAK_AUG, self.augment_cfg.get('weak', {}))
         self.strong_aug = merge_aug_config(STRONG_AUG, self.augment_cfg.get('strong', {}))
-        self.aug_noise = ThermalAugmentation()
+        self.thermal_aug = ThermalAugmentation()
         if isinstance(cfg.get('data'), dict):
             cfg['data'] = cfg['data'].get('train', 'coco128.yaml')
         
@@ -66,6 +70,20 @@ class SemiTrainer(DetectionTrainer):
         self.lambda_unsup = self.semi_cfg.get('lambda_unsup', 1.0)
         self.lambda_warmup = self.semi_cfg.get('lambda_warmup', 5)
         self.ema_decay = self.semi_cfg.get('ema_decay', 0.999)
+        
+        # Background penalty configuration
+        self.lambda_bg = self.semi_cfg.get('lambda_bg', 1.0)
+        self.lambda_bg_warmup = self.semi_cfg.get('lambda_bg_warmup', 5)
+        self.lambda_bg_schedule = self.semi_cfg.get('lambda_bg_schedule', 'linear')
+        self.use_focal_bg = self.semi_cfg.get('use_focal_bg', False)
+        
+        # Initialize background penalty scheduler
+        self.bg_penalty_scheduler = AdaptiveBgPenaltyScheduler(
+            lambda_bg_max=self.lambda_bg,
+            warmup_epochs=self.lambda_bg_warmup,
+            schedule=self.lambda_bg_schedule,
+            burn_in_epochs=self.burn_in_epochs,
+        )
 
         self.teacher = None
         self.filter_chain = None
@@ -75,10 +93,24 @@ class SemiTrainer(DetectionTrainer):
         
         LOGGER.info(colorstr('Semi-SSL: ') + f'Weak aug: mosaic={self.weak_aug.get("mosaic")}, mixup={self.weak_aug.get("mixup")}')
         LOGGER.info(colorstr('Semi-SSL: ') + f'Strong aug: mosaic={self.strong_aug.get("mosaic")}, mixup={self.strong_aug.get("mixup")}')
+        LOGGER.info(colorstr('Semi-SSL: ') + 
+                   f'Background penalty: λ_bg={self.lambda_bg}, warmup={self.lambda_bg_warmup}, '
+                   f'schedule={self.lambda_bg_schedule}, focal={self.use_focal_bg}')
 
     def _setup_train(self):
         """Setup training with teacher model and data module."""
         super()._setup_train()
+        
+        # Replace default loss with custom loss including background penalty
+        current_lambda_bg = self.bg_penalty_scheduler.get_lambda_bg(0)
+        self.model.criterion = v8DetectionLossWithBgPenalty(
+            self.model,
+            tal_topk=10,
+            lambda_bg=current_lambda_bg,
+            use_focal_bg=self.use_focal_bg,
+        )
+        LOGGER.info(colorstr('Semi-SSL: ') + 
+                   f'Using v8DetectionLossWithBgPenalty (λ_bg={current_lambda_bg:.3f})')
 
         self.teacher = ModelEMA(self.model, decay=self.ema_decay)
         LOGGER.info(colorstr('Semi-SSL: ') + f'Teacher initialized with EMA decay={self.ema_decay}')
@@ -129,7 +161,12 @@ class SemiTrainer(DetectionTrainer):
 
         self._setup_train()
 
-        nb = len(self.train_loader)
+        # [FIX LOOP] Xác định số batch dựa trên tập Unlabeled (Lớn nhất)
+        if self.semi_data and self.semi_data.unlabeled_loader_weak:
+            nb = len(self.semi_data.unlabeled_loader_weak)
+        else:
+            nb = len(self.train_loader)
+            
         nw = max(round(self.args.warmup_epochs * nb), 100)
         
         self.epoch_time = None
@@ -140,46 +177,93 @@ class SemiTrainer(DetectionTrainer):
         LOGGER.info(colorstr('Semi-SSL: ') + f'Burn-in for {self.burn_in_epochs} epochs')
         if self.semi_data:
             LOGGER.info(colorstr('Semi-SSL: ') + f'Labeled: {self.semi_data.num_labeled}, Unlabeled: {self.semi_data.num_unlabeled}')
-        LOGGER.info(colorstr('Semi-SSL: ') + f'{self.filter_chain}')
+        
         self.last_opt_step = -1
         self.optimizer.zero_grad()
 
         for epoch in range(self.start_epoch, self.epochs):
             self.epoch = epoch
+            
+            # Update background penalty weight for current epoch
+            current_lambda_bg = self.bg_penalty_scheduler.get_lambda_bg(epoch)
+            if hasattr(self.model, 'criterion') and hasattr(self.model.criterion, 'lambda_bg'):
+                self.model.criterion.lambda_bg = current_lambda_bg
+                if epoch % 5 == 0 or epoch == self.burn_in_epochs:
+                    LOGGER.info(colorstr('Semi-SSL: ') + f'Epoch {epoch}: λ_bg={current_lambda_bg:.3f}')
+
+            # Sync Epoch cho DataModule
+            if self.semi_data:
+                self.semi_data.set_epoch(epoch)
+            
             self.model.train()
             self.run_callbacks('on_train_epoch_start')
-            self.filter_chain.update(epoch, self.epochs)
+            
+            if self.filter_chain:
+                self.filter_chain.update(epoch, self.epochs)
 
             self.in_burn_in = epoch < self.burn_in_epochs
+            
+            # Update DSAT thresholds (nếu có)
             if not self.in_burn_in:
                 self._update_dsat_from_metrics()
-            pbar = TQDM(enumerate(self.train_loader), total=nb)
+            
+            # [FIX LOOP] Lặp theo số batch của Unlabeled Data
+            pbar = tqdm(range(nb), total=nb, bar_format='{l_bar}{bar:10}{r_bar}')
             self.tloss = None
-            for i, batch in pbar:
+
+            for i in pbar:
                 self.run_callbacks('on_train_batch_start')
                 ni = i + nb * epoch
                 lambda_u = self._get_lambda_unsup(epoch)
-                
-                if ni <= nw:
-                    self._warmup(ni, nw)
 
+                # 1. Lấy dữ liệu (Đã đồng bộ)
+                # Giả định SemiDataModule đã có hàm get_semi_batch()
+                # Nếu chưa có, bạn cần gộp get_batch() và get_unsup_batch() như hướng dẫn trước
+                batch_labeled, batch_u_weak, batch_u_strong = self.semi_data.get_semi_batch()
+            
+                # 2. Tiền xử lý (Preprocess) & Augmentation
                 with torch.autocast(self.device.type, enabled=self.amp):
-                    batch = self.preprocess_batch(batch)
-                    if not self.in_burn_in:
-                        imgs = batch["img"]
-                        batch["img"] = self.aug_noise(imgs)
-                    loss_sup, loss_items_sup = self.model(batch)
+                    # Preprocess: Chuyển lên GPU, chia 255 (nếu cần)
+                    batch_labeled = self.preprocess_batch(batch_labeled)
+                    
+                    # [FIX FLOAT] Xử lý thủ công cho Unlabeled nếu preprocess mặc định không chạy
+                    if isinstance(batch_u_weak['img'], torch.Tensor) and batch_u_weak['img'].dtype == torch.uint8:
+                         batch_u_weak['img'] = batch_u_weak['img'].float() / 255.0
+                    elif batch_u_weak['img'].max() > 1.0:
+                         batch_u_weak['img'] = batch_u_weak['img'].float() / 255.0
+                    batch_u_weak['img'] = batch_u_weak['img'].to(self.device)
 
+                    if isinstance(batch_u_strong['img'], torch.Tensor) and batch_u_strong['img'].dtype == torch.uint8:
+                         batch_u_strong['img'] = batch_u_strong['img'].float() / 255.0
+                    elif batch_u_strong['img'].max() > 1.0:
+                         batch_u_strong['img'] = batch_u_strong['img'].float() / 255.0
+                    batch_u_strong['img'] = batch_u_strong['img'].to(self.device)
+
+                    # 3. Augmentation thêm (Thermal Noise) - Chỉ khi hết Burn-in
+                    if not self.in_burn_in:
+                        batch_labeled['img'] = self.thermal_aug(batch_labeled['img'])
+                        batch_u_strong['img'] = self.thermal_aug(batch_u_strong['img'])
+                
+                    # Warmup
+                    if ni <= nw:
+                        self._warmup(ni, nw)
+
+                    # 4. Supervised Forward
+                    loss_sup, loss_items_sup = self.model(batch_labeled)
+
+                    # 5. Unsupervised Forward
                     if self.in_burn_in or self.semi_data is None:
                         loss = loss_sup
-                        loss_unsup = torch.tensor([0.0, 0.0, 0.0], device=self.device)
-                        loss_items_unsup = torch.tensor([0.0, 0.0, 0.0], device=self.device)
+                        loss_unsup = torch.tensor(0.0, device=self.device)
+                        loss_items_unsup = torch.zeros(3, device=self.device)
                     else:
-                        loss_unsup, loss_items_unsup = self._compute_unsup_loss()
+                        loss_unsup, loss_items_unsup, total_boxes = self._compute_unsup_loss(batch_u_weak, batch_u_strong)
                         loss = loss_sup + lambda_u * loss_unsup
 
+                    # 6. Backward
                     self.loss_items = loss_items_sup + lambda_u * loss_items_unsup
-                    self.loss = loss.sum()
+                    self.loss = loss.sum() # Đảm bảo là scalar
+                
                 self.scaler.scale(self.loss).backward()
 
                 if ni - self.last_opt_step >= self.accumulate:
@@ -187,6 +271,7 @@ class SemiTrainer(DetectionTrainer):
                     self.last_opt_step = ni
 
                 if not self.in_burn_in:
+                    # Update EMA Teacher
                     self.teacher.update(self.model)
 
                 self._update_loss(self.loss_items)
@@ -198,12 +283,25 @@ class SemiTrainer(DetectionTrainer):
                     loss=f'{self.loss.item():.4f}',
                     loss_sup=f'{loss_sup.sum().item():.4f}',
                     loss_unsup=f'{loss_unsup.sum().item():.4f}' if not self.in_burn_in else '-',
-                    lambda_u = f'{lambda_u}'
+                    lambda_u=f'{lambda_u:.2f}',
+                    lambda_bg=f'{current_lambda_bg:.2f}',
+                    total_boxes=f'{total_boxes:.2f}' if not self.in_burn_in else '-',
                 )
-                pbar.update()
-                if i > nb and self.in_burn_in:
+                pbar.update(nb//len(self.train_loader))
+                if i > len(self.train_loader) and self.in_burn_in:
                     break
+                
+            # End Batch Loop
             pbar.close()
+            
+            # Log background penalty statistics
+            if hasattr(self.model, 'criterion') and hasattr(self.model.criterion, 'get_bg_penalty_stats'):
+                bg_stats = self.model.criterion.get_bg_penalty_stats()
+                if bg_stats['mean'] > 0:
+                    LOGGER.info(colorstr('Semi-SSL: ') + 
+                               f'Epoch {epoch} BG Penalty Stats: '
+                               f'mean={bg_stats["mean"]:.4f}, max={bg_stats["max"]:.4f}, min={bg_stats["min"]:.4f}')
+                self.model.criterion.reset_bg_penalty_history()
 
             self.lr = {f'lr/pg{i}': x['lr'] for i, x in enumerate(self.optimizer.param_groups)}
             self.run_callbacks('on_train_epoch_end')
@@ -216,40 +314,33 @@ class SemiTrainer(DetectionTrainer):
 
         self.run_callbacks('on_train_end')
 
-    def _compute_unsup_loss(self):
+    def _compute_unsup_loss(self, batch_u_weak, batch_u_strong):
         """
         Compute unsupervised loss using pseudo-labels from teacher.
         """
         if self.semi_data is None:
-            LOGGER.warning(colorstr('Semi-SSL DEBUG: ') + 'semi_data is None!')
-            return torch.tensor([0.0, 0.0, 0.0], device=self.device), torch.tensor([0.0, 0.0, 0.0], device=self.device)
+            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
 
-        # Step 1: Get batches
-        unlabeled_weak, unlabeled_strong = self.semi_data.get_unsup_batch()
-
-        if unlabeled_weak['img'].max() > 1.0: 
-            unlabeled_weak['img'] = unlabeled_weak['img'].to(self.device).float() / 255.0
-        weak_imgs = unlabeled_weak['img']
-        img_size = weak_imgs.shape[2]
-        batch_size = weak_imgs.shape[0]
-
-        # Step 2: Teacher inference
+        # Teacher inference (trên ảnh Weak)
         with torch.no_grad():
+            # Teacher EMA model
             teacher_model = self.teacher.ema
             teacher_model.eval()
-            teacher_preds = teacher_model(weak_imgs)
+            teacher_preds = teacher_model(batch_u_weak['img'])
         
+        # Lấy kích thước ảnh để normalize box
+        img_size = batch_u_weak['img'].shape[2] # H hoặc W (giả sử vuông)
+        
+        # Extract predictions per image
         pseudo_results = self._extract_predictions_per_image(teacher_preds, img_size)
         
         all_boxes = []
         all_cls = []
         all_batch_idx = []
         total_boxes = 0
-        total_before_filter = 0
-        total_after_filter = 0
- 
+
+        # Loop qua từng ảnh để lọc và gom Pseudo-Label
         for img_idx, (boxes, scores, labels, uncertainties) in enumerate(pseudo_results):
-            total_before_filter += len(boxes)
             if len(boxes) > 0:
                 predictions = {
                     'boxes': boxes,
@@ -257,33 +348,42 @@ class SemiTrainer(DetectionTrainer):
                     'cls_scores': scores,
                     'uncertainties': uncertainties,
                 }
-                mask, _ = self.filter_chain(predictions)
-                total_after_filter += mask.sum().item()
-                
+                # Lọc qua FilterChain (DSAT...)
+                if self.filter_chain:
+                    mask, _ = self.filter_chain(predictions)
+                else:
+                    mask = scores > 0.5 # Fallback nếu không có filter
+
                 if mask.sum().item() > 0:
+                    # Convert sang xywh normalized (YOLO format)
                     boxes_xywh = self._xyxy_to_xywhn(boxes[mask], img_size)
                     all_boxes.append(boxes_xywh)
                     all_cls.append(labels[mask].float())
                     all_batch_idx.append(torch.full((mask.sum(),), img_idx, device=self.device))
                     total_boxes += mask.sum().item()
 
+        # [FIX LOSS] Xử lý batch rỗng (Background)
         if total_boxes == 0:
-            all_boxes = [torch.zeros((0, 4), device=self.device)]
-            all_cls = [torch.zeros(0, device=self.device)]
-            all_batch_idx = [torch.zeros(0, device=self.device)]
-        
-        if unlabeled_strong['img'].max() > 1.0: 
-            unlabeled_strong['img'] = unlabeled_strong['img'].to(self.device).float() / 255.0
+            final_boxes = torch.zeros((0, 4), device=self.device)
+            final_cls = torch.zeros((0,), device=self.device)
+            final_batch_idx = torch.zeros((0,), device=self.device)
+        else:
+            final_boxes = torch.cat(all_boxes)
+            final_cls = torch.cat(all_cls)
+            final_batch_idx = torch.cat(all_batch_idx)
 
+        # Tạo Pseudo Batch cho Student
         pseudo_batch = {
-            'img': unlabeled_strong['img'],
-            'cls': torch.cat(all_cls),
-            'bboxes': torch.cat(all_boxes),
-            'batch_idx': torch.cat(all_batch_idx),
+            'img': batch_u_strong['img'],
+            'cls': final_cls.view(-1, 1), # Shape (N, 1)
+            'bboxes': final_boxes,        # Shape (N, 4)
+            'batch_idx': final_batch_idx.view(-1, 1) # Shape (N, 1)
         }
+        
+        # Student Forward & Loss
         loss_unsup, loss_items_unsup = self.model(pseudo_batch)
 
-        return loss_unsup, loss_items_unsup
+        return loss_unsup, loss_items_unsup, total_boxes    
     
     def _extract_predictions_per_image(self, preds, img_size: int):
         """Extract predictions per image using NMS-Unc.

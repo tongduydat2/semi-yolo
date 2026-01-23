@@ -232,6 +232,33 @@ class SemiDataModule:
             collate_fn=YOLODataset.collate_fn,
         )
 
+    def get_semi_batch(self):
+        """
+            Trả về trọn bộ 3 thành phần cho 1 bước training:
+            1. Labeled Batch (Đã tự động lặp lại nếu hết)
+            2. Unlabeled Weak (Cho Teacher)
+            3. Unlabeled Strong (Cho Student)
+        """
+        # 1. Lấy Unlabeled (Weak + Strong) - Buộc phải đồng bộ
+        try:
+            u_weak = next(self._unlabeled_weak_iter)
+            u_strong = next(self._unlabeled_strong_iter)
+        except StopIteration:
+            # Hết epoch của Unlabeled -> Reset cả hai
+            self._current_epoch += 1
+            self.set_epoch(self._current_epoch)
+            u_weak = next(self._unlabeled_weak_iter)
+            u_strong = next(self._unlabeled_strong_iter)
+
+        # 2. Lấy Labeled (Tự động lặp lại - Cycle)
+        try:
+            labeled = next(self._labeled_iter)
+        except StopIteration:
+            self._labeled_iter = iter(self.labeled_loader)
+            labeled = next(self._labeled_iter)
+            
+        return labeled, u_weak, u_strong
+
     def set_epoch(self, epoch: int):
         """
         Set epoch for synchronized sampling.
