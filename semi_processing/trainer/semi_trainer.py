@@ -90,6 +90,13 @@ class SemiTrainer(DetectionTrainer):
         self.freeze_enabled = self.freeze_cfg.get('enabled', False)
         self.freeze_backbone = self.freeze_cfg.get('freeze_backbone', False)
         self.freeze_layers = self.freeze_cfg.get('freeze_layers', [])
+        
+        # Consistency regularization configuration
+        self.consistency_cfg = self.semi_cfg.get('consistency', {})
+        self.consistency_enabled = self.consistency_cfg.get('enabled', False)
+        self.lambda_consistency = self.consistency_cfg.get('lambda_consistency', 1.0)
+        self.consistency_conf_threshold = self.consistency_cfg.get('confidence_threshold', 0.1)
+        self.use_feature_consistency = self.consistency_cfg.get('use_feature_consistency', False)
 
         self.teacher = None
         self.filter_chain = None
@@ -106,6 +113,10 @@ class SemiTrainer(DetectionTrainer):
         LOGGER.info(colorstr('Semi-SSL: ') + 
                    f'Background penalty: λ_bg={self.lambda_bg}, warmup={self.lambda_bg_warmup}, '
                    f'schedule={self.lambda_bg_schedule}, focal={self.use_focal_bg}')
+        if self.consistency_enabled:
+            LOGGER.info(colorstr('Semi-SSL: ') + 
+                       f'Consistency regularization: enabled, λ={self.lambda_consistency}, '
+                       f'conf_threshold={self.consistency_conf_threshold}')
 
     def _setup_train(self):
         """Setup training with teacher model and data module."""
@@ -265,7 +276,7 @@ class SemiTrainer(DetectionTrainer):
                     # 3. Augmentation thêm (Thermal Noise) - Chỉ khi hết Burn-in
                     if not self.in_burn_in:
                         batch_labeled['img'] = self.thermal_aug(batch_labeled['img'])
-                        batch_u_strong['img'] = self.thermal_aug(batch_u_strong['img'])
+                        # batch_u_strong['img'] = self.thermal_aug(batch_u_strong['img'])
                 
                     # Warmup
                     if ni <= nw:
@@ -340,9 +351,10 @@ class SemiTrainer(DetectionTrainer):
     def _compute_unsup_loss(self, batch_u_weak, batch_u_strong):
         """
         Compute unsupervised loss using pseudo-labels from teacher.
+        Falls back to consistency regularization when no pseudo-labels available.
         """
         if self.semi_data is None:
-            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
+            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device), 0
 
         # Teacher inference (trên ảnh Weak)
         with torch.no_grad():
@@ -387,6 +399,18 @@ class SemiTrainer(DetectionTrainer):
 
         # [FIX LOSS] Xử lý batch rỗng (Background)
         if total_boxes == 0:
+            # No pseudo-labels → Fall back to consistency regularization
+            loss_consistency, loss_items_consistency = self._compute_consistency_loss(
+                batch_u_weak, batch_u_strong
+            )
+            
+            if self.consistency_enabled:
+                LOGGER.debug(f'Empty pseudo-labels, using consistency loss: {loss_consistency.item():.4f}')
+            
+            return loss_consistency, loss_items_consistency, 0
+        
+        # Continue with normal pseudo-label path
+        if True:  # Indentation fix
             final_boxes = torch.zeros((0, 4), device=self.device)
             final_cls = torch.zeros((0,), device=self.device)
             final_batch_idx = torch.zeros((0,), device=self.device)
@@ -406,7 +430,75 @@ class SemiTrainer(DetectionTrainer):
         # Student Forward & Loss
         loss_unsup, loss_items_unsup = self.model(pseudo_batch)
 
-        return loss_unsup, loss_items_unsup, total_boxes    
+        return loss_unsup, loss_items_unsup, total_boxes
+    
+    def _compute_consistency_loss(self, batch_u_weak, batch_u_strong):
+        """
+        Compute consistency regularization loss when no pseudo-labels available.
+        
+        Forces model predictions to be consistent across weak and strong augmentations,
+        exploiting unlabeled data even when filters reject all pseudo-labels.
+        
+        Mathematical formulation:
+            L_consistency = 1 - CosineSim(f(A_weak(x)), f(A_strong(x)))
+        
+        Args:
+            batch_u_weak: Weakly augmented unlabeled batch
+            batch_u_strong: Strongly augmented unlabeled batch
+            
+        Returns:
+            loss_consistency: Consistency loss value
+            loss_items: Loss breakdown [0, consistency, 0]
+        """
+        if not self.consistency_enabled:
+            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
+        
+        with torch.cuda.amp.autocast(enabled=self.amp):
+            # Get predictions on weak augmentation (no gradient)
+            with torch.no_grad():
+                preds_weak = self.model(batch_u_weak['img'])
+                if isinstance(preds_weak, (list, tuple)):
+                    preds_weak = preds_weak[0]
+                scores_weak = preds_weak['scores'].sigmoid()  # (B, N, C)
+                
+                # Check confidence gating
+                max_conf = scores_weak.max(dim=-1)[0].max(dim=-1)[0]  # (B,)
+                apply_consistency = (max_conf > self.consistency_conf_threshold).float()
+            
+            # Get predictions on strong augmentation (with gradient)
+            preds_strong = self.model(batch_u_strong['img'])
+            if isinstance(preds_strong, (list, tuple)):
+                preds_strong = preds_strong[0]
+            scores_strong = preds_strong['scores'].sigmoid()  # (B, N, C)
+            
+            # Flatten spatial dimensions for vectorized cosine similarity
+            # (B, N, C) → (B, N*C)
+            feat_weak = scores_weak.flatten(1)
+            feat_strong = scores_strong.flatten(1)
+            
+            # Cosine similarity per sample
+            cosine_sim = torch.nn.functional.cosine_similarity(
+                feat_weak, feat_strong, dim=1
+            )  # (B,)
+            
+            # Apply confidence gating: only penalize when weak aug is confident
+            cosine_sim = cosine_sim * apply_consistency
+            
+            # Consistency loss: 1 - cosine_similarity (lower is better)
+            loss_consistency = (1 - cosine_sim).mean()
+            
+            # Weight by lambda
+            loss_consistency = self.lambda_consistency * loss_consistency
+            
+            # Return as [box_loss, cls_loss, dfl_loss] format
+            # Put in cls_loss slot since it's classification-related
+            loss_items = torch.tensor([
+                0.0,                         # box loss
+                loss_consistency.item(),     # cls loss (repurposed for consistency)
+                0.0                          # dfl loss
+            ], device=self.device)
+        
+        return loss_consistency.unsqueeze(0), loss_items
     
     def _extract_predictions_per_image(self, preds, img_size: int):
         """Extract predictions per image using NMS-Unc.
@@ -451,10 +543,10 @@ class SemiTrainer(DetectionTrainer):
 
     def _get_lambda_unsup(self, epoch: int) -> float:
         """Get unsupervised loss weight with warmup."""
-        if epoch < self.burn_in_epochs:
+        if epoch < self.burn_in_epochs - 1:
             return 0.0
 
-        effective_epoch = epoch - self.burn_in_epochs
+        effective_epoch = epoch - self.burn_in_epochs + 1
         if effective_epoch < self.lambda_warmup:
             return self.lambda_unsup * (effective_epoch / self.lambda_warmup)
 
