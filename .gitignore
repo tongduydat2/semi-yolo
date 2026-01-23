@@ -1,0 +1,16 @@
+# ===== Model weights =====
+*.pt
+
+# ===== Training outputs =====
+runs/
+
+# ===== Papers =====
+papers/
+
+# ===== Python cache =====
+__pycache__/
+*.pyc
+
+# ===== Media / docs =====
+*.jpg
+*.pdf
