@@ -432,91 +432,107 @@ class SemiTrainer(DetectionTrainer):
 
         return loss_unsup, loss_items_unsup, total_boxes
     
+    
     def _compute_consistency_loss(self, batch_u_weak, batch_u_strong):
         """
         Compute consistency regularization loss when no pseudo-labels available.
-        
-        Forces model predictions to be consistent across weak and strong augmentations,
-        exploiting unlabeled data even when filters reject all pseudo-labels.
-        
-        Mathematical formulation:
-            L_consistency = 1 - CosineSim(f(A_weak(x)), f(A_strong(x)))
-        
-        Args:
-            batch_u_weak: Weakly augmented unlabeled batch
-            batch_u_strong: Strongly augmented unlabeled batch
-            
-        Returns:
-            loss_consistency: Consistency loss value
-            loss_items: Loss breakdown [0, consistency, 0]
         """
         if not self.consistency_enabled:
             return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
         
-        with torch.cuda.amp.autocast(enabled=self.amp):
-            # Get predictions on weak augmentation (no gradient)
-            with torch.no_grad():
-                preds_weak = self.model(batch_u_weak['img'])
-                # Model returns (predictions, loss) tuple or just predictions
-                if isinstance(preds_weak, tuple):
-                    preds_weak = preds_weak[0]
+        try:
+            with torch.cuda.amp.autocast(enabled=self.amp):
+                # Get predictions on weak augmentation (no gradient)
+                with torch.no_grad():
+                    preds_weak = self.model(batch_u_weak['img'])
+                    
+                    # Handle tuple output (loss, preds)
+                    if isinstance(preds_weak, tuple):
+                        preds_weak = preds_weak[0]
+                    
+                    # Ensure list of feature maps
+                    if not isinstance(preds_weak, (list, tuple)):
+                        preds_weak = [preds_weak]
+                        
+                    # Process weak scores from all feature maps
+                    weak_feats = []
+                    for i, pred in enumerate(preds_weak):
+                        # Expected shape: (B, 4+C, H, W)
+                        if pred.dim() == 4:
+                            # Slice channel dimension: [:, 4:, :, :]
+                            score = pred[:, 4:, :, :].sigmoid()
+                            weak_feats.append(score.flatten(1))
+                        elif pred.dim() == 3:
+                            # Shape: (B, 4+C, N) or (B, N, 4+C)
+                            if pred.shape[1] == self.model.nc + 4:
+                                score = pred[:, 4:, :].sigmoid()
+                            else:
+                                score = pred[..., 4:].sigmoid()
+                            weak_feats.append(score.flatten(1))
+                            
+                    if not weak_feats:
+                        return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
+                        
+                    # Concatenate all features (B, total_features)
+                    flat_weak = torch.cat(weak_feats, dim=1)
+                    
+                    # Check confidence gating
+                    # Max over all features per sample
+                    max_conf_per_sample = flat_weak.max(dim=1)[0]  # (B,)
+                    apply_consistency = (max_conf_per_sample > self.consistency_conf_threshold).float()
                 
-                # preds_weak is a list of predictions at different scales
-                # We use the first one (main prediction head)
-                if isinstance(preds_weak, (list, tuple)):
-                    pred_weak = preds_weak[0]
-                else:
-                    pred_weak = preds_weak
+                # Get predictions on strong augmentation (with gradient)
+                preds_strong = self.model(batch_u_strong['img'])
                 
-                # pred_weak shape: (B, num_anchors, 4+num_classes)
-                # Extract class scores (last num_classes channels)
-                num_classes = self.model.nc
-                scores_weak = pred_weak[..., 4:4+num_classes].sigmoid()  # (B, N, C)
+                if isinstance(preds_strong, tuple):
+                    preds_strong = preds_strong[0]
+                if not isinstance(preds_strong, (list, tuple)):
+                    preds_strong = [preds_strong]
+                    
+                # Process strong scores
+                strong_feats = []
+                for i, pred in enumerate(preds_strong):
+                    if pred.dim() == 4:
+                        score = pred[:, 4:, :, :].sigmoid()
+                        strong_feats.append(score.flatten(1))
+                    elif pred.dim() == 3:
+                        if pred.shape[1] == self.model.nc + 4:
+                            score = pred[:, 4:, :].sigmoid()
+                        else:
+                            score = pred[..., 4:].sigmoid()
+                        strong_feats.append(score.flatten(1))
                 
-                # Check confidence gating
-                max_conf = scores_weak.max(dim=-1)[0].max(dim=-1)[0]  # (B,)
-                apply_consistency = (max_conf > self.consistency_conf_threshold).float()
+                if not strong_feats:
+                    return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
+                    
+                flat_strong = torch.cat(strong_feats, dim=1)
+                
+                # Cosine similarity per sample
+                cosine_sim = torch.nn.functional.cosine_similarity(
+                    flat_weak, flat_strong, dim=1
+                )  # (B,)
+                
+                # Apply confidence gating
+                cosine_sim_gated = cosine_sim * apply_consistency
+                
+                # Consistency loss: 1 - cosine_similarity
+                # Use max(0) to avoid negative values due to precision
+                loss_consistency = (1 - cosine_sim_gated).clamp(min=0).mean()
+                
+                # Weight by lambda
+                loss_consistency = self.lambda_consistency * loss_consistency
+                
+                loss_items = torch.tensor([
+                    0.0,
+                    loss_consistency.item(),
+                    0.0
+                ], device=self.device)
             
-            # Get predictions on strong augmentation (with gradient)
-            preds_strong = self.model(batch_u_strong['img'])
-            if isinstance(preds_strong, tuple):
-                preds_strong = preds_strong[0]
+            return loss_consistency.unsqueeze(0), loss_items
             
-            if isinstance(preds_strong, (list, tuple)):
-                pred_strong = preds_strong[0]
-            else:
-                pred_strong = preds_strong
-            
-            scores_strong = pred_strong[..., 4:4+num_classes].sigmoid()  # (B, N, C)
-            
-            # Flatten spatial dimensions for vectorized cosine similarity
-            # (B, N, C) → (B, N*C)
-            feat_weak = scores_weak.flatten(1)
-            feat_strong = scores_strong.flatten(1)
-            
-            # Cosine similarity per sample
-            cosine_sim = torch.nn.functional.cosine_similarity(
-                feat_weak, feat_strong, dim=1
-            )  # (B,)
-            
-            # Apply confidence gating: only penalize when weak aug is confident
-            cosine_sim = cosine_sim * apply_consistency
-            
-            # Consistency loss: 1 - cosine_similarity (lower is better)
-            loss_consistency = (1 - cosine_sim).mean()
-            
-            # Weight by lambda
-            loss_consistency = self.lambda_consistency * loss_consistency
-            
-            # Return as [box_loss, cls_loss, dfl_loss] format
-            # Put in cls_loss slot since it's classification-related
-            loss_items = torch.tensor([
-                0.0,                         # box loss
-                loss_consistency.item(),     # cls loss (repurposed for consistency)
-                0.0                          # dfl loss
-            ], device=self.device)
-        
-        return loss_consistency.unsqueeze(0), loss_items
+        except Exception as e:
+            LOGGER.warning(f'Consistency loss error: {e}. shapes: weak={[p.shape for p in preds_weak]}, strong={[p.shape for p in preds_strong]}')
+            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
     
     def _extract_predictions_per_image(self, preds, img_size: int):
         """Extract predictions per image using NMS-Unc.
