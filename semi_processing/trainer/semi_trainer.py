@@ -18,7 +18,6 @@ from torch import Tensor
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.utils import LOGGER, RANK, colorstr
-from ultralytics.utils.torch_utils import ModelEMA
 from ultralytics.cfg import get_cfg, DEFAULT_CFG
 
 from filters.base import FilterChain, build_filter_chain
@@ -33,6 +32,7 @@ from losses.bg_penalty_loss import (
     v8DetectionLossWithBgPenalty,
     AdaptiveBgPenaltyScheduler
 )
+from utils.selective_ema import SelectiveModelEMA
 class SemiTrainer(DetectionTrainer):
     """
     Semi-Supervised Trainer extending Ultralytics DetectionTrainer.
@@ -70,6 +70,7 @@ class SemiTrainer(DetectionTrainer):
         self.lambda_unsup = self.semi_cfg.get('lambda_unsup', 1.0)
         self.lambda_warmup = self.semi_cfg.get('lambda_warmup', 5)
         self.ema_decay = self.semi_cfg.get('ema_decay', 0.999)
+        self.ema_tau = self.semi_cfg.get('ema_tau', 2000)
         
         # Background penalty configuration
         self.lambda_bg = self.semi_cfg.get('lambda_bg', 1.0)
@@ -91,13 +92,6 @@ class SemiTrainer(DetectionTrainer):
         self.freeze_backbone = self.freeze_cfg.get('freeze_backbone', False)
         self.freeze_layers = self.freeze_cfg.get('freeze_layers', [])
         
-        # Consistency regularization configuration
-        self.consistency_cfg = self.semi_cfg.get('consistency', {})
-        self.consistency_enabled = self.consistency_cfg.get('enabled', False)
-        self.lambda_consistency = self.consistency_cfg.get('lambda_consistency', 1.0)
-        self.consistency_conf_threshold = self.consistency_cfg.get('confidence_threshold', 0.1)
-        self.use_feature_consistency = self.consistency_cfg.get('use_feature_consistency', False)
-
         self.teacher = None
         self.filter_chain = None
         self.semi_data = None
@@ -113,10 +107,6 @@ class SemiTrainer(DetectionTrainer):
         LOGGER.info(colorstr('Semi-SSL: ') + 
                    f'Background penalty: λ_bg={self.lambda_bg}, warmup={self.lambda_bg_warmup}, '
                    f'schedule={self.lambda_bg_schedule}, focal={self.use_focal_bg}')
-        if self.consistency_enabled:
-            LOGGER.info(colorstr('Semi-SSL: ') + 
-                       f'Consistency regularization: enabled, λ={self.lambda_consistency}, '
-                       f'conf_threshold={self.consistency_conf_threshold}')
 
     def _setup_train(self):
         """Setup training with teacher model and data module."""
@@ -133,8 +123,8 @@ class SemiTrainer(DetectionTrainer):
         LOGGER.info(colorstr('Semi-SSL: ') + 
                    f'Using v8DetectionLossWithBgPenalty (λ_bg={current_lambda_bg:.3f})')
 
-        self.teacher = ModelEMA(self.model, decay=self.ema_decay)
-        LOGGER.info(colorstr('Semi-SSL: ') + f'Teacher initialized with EMA decay={self.ema_decay}')
+        self.teacher = SelectiveModelEMA(self.model, decay=self.ema_decay, tau=self.ema_tau)
+        LOGGER.info(colorstr('Semi-SSL: ') + f'Teacher initialized with SelectiveEMA decay={self.ema_decay}')
 
         filter_config = self.semi_cfg.get('filters', [
             {'name': 'dsat', 'params': {'num_classes': self.data.get('nc', 80)}},
@@ -205,10 +195,9 @@ class SemiTrainer(DetectionTrainer):
         
         self.last_opt_step = -1
         self.optimizer.zero_grad()
-
+        self.best_loss = float('inf')
         for epoch in range(self.start_epoch, self.epochs):
             self.epoch = epoch
-            
             # Update background penalty weight for current epoch
             current_lambda_bg = self.bg_penalty_scheduler.get_lambda_bg(epoch)
             if hasattr(self.model, 'criterion') and hasattr(self.model.criterion, 'lambda_bg'):
@@ -304,9 +293,7 @@ class SemiTrainer(DetectionTrainer):
                     self.optimizer_step()
                     self.last_opt_step = ni
 
-                if not self.in_burn_in:
-                    # Update EMA Teacher
-                    self.teacher.update(self.model)
+                self.teacher.update(self.model)
 
                 self._update_loss(self.loss_items)
 
@@ -399,25 +386,11 @@ class SemiTrainer(DetectionTrainer):
 
         # [FIX LOSS] Xử lý batch rỗng (Background)
         if total_boxes == 0:
-            # No pseudo-labels → Fall back to consistency regularization
-            loss_consistency, loss_items_consistency = self._compute_consistency_loss(
-                batch_u_weak, batch_u_strong
-            )
-            
-            if self.consistency_enabled:
-                LOGGER.debug(f'Empty pseudo-labels, using consistency loss: {loss_consistency.item():.4f}')
-            
-            return loss_consistency, loss_items_consistency, 0
-        
-        # Continue with normal pseudo-label path
-        if True:  # Indentation fix
-            final_boxes = torch.zeros((0, 4), device=self.device)
-            final_cls = torch.zeros((0,), device=self.device)
-            final_batch_idx = torch.zeros((0,), device=self.device)
-        else:
-            final_boxes = torch.cat(all_boxes)
-            final_cls = torch.cat(all_cls)
-            final_batch_idx = torch.cat(all_batch_idx)
+            return torch.tensor([0.0, 0.0, 0.0], device=self.device), torch.tensor([0.0, 0.0, 0.0], device=self.device), 0
+       
+        final_boxes = torch.cat(all_boxes)
+        final_cls = torch.cat(all_cls)
+        final_batch_idx = torch.cat(all_batch_idx)
 
         # Tạo Pseudo Batch cho Student
         pseudo_batch = {
@@ -431,108 +404,6 @@ class SemiTrainer(DetectionTrainer):
         loss_unsup, loss_items_unsup = self.model(pseudo_batch)
 
         return loss_unsup, loss_items_unsup, total_boxes
-    
-    
-    def _compute_consistency_loss(self, batch_u_weak, batch_u_strong):
-        """
-        Compute consistency regularization loss when no pseudo-labels available.
-        """
-        if not self.consistency_enabled:
-            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
-        
-        try:
-            with torch.cuda.amp.autocast(enabled=self.amp):
-                # Get predictions on weak augmentation (no gradient)
-                with torch.no_grad():
-                    preds_weak = self.model(batch_u_weak['img'])
-                    
-                    # Handle tuple output (loss, preds)
-                    if isinstance(preds_weak, tuple):
-                        preds_weak = preds_weak[0]
-                    
-                    # Ensure list of feature maps
-                    if not isinstance(preds_weak, (list, tuple)):
-                        preds_weak = [preds_weak]
-                        
-                    # Process weak scores from all feature maps
-                    weak_feats = []
-                    for i, pred in enumerate(preds_weak):
-                        # Expected shape: (B, 4+C, H, W)
-                        if pred.dim() == 4:
-                            # Slice channel dimension: [:, 4:, :, :]
-                            score = pred[:, 4:, :, :].sigmoid()
-                            weak_feats.append(score.flatten(1))
-                        elif pred.dim() == 3:
-                            # Shape: (B, 4+C, N) or (B, N, 4+C)
-                            if pred.shape[1] == self.model.nc + 4:
-                                score = pred[:, 4:, :].sigmoid()
-                            else:
-                                score = pred[..., 4:].sigmoid()
-                            weak_feats.append(score.flatten(1))
-                            
-                    if not weak_feats:
-                        return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
-                        
-                    # Concatenate all features (B, total_features)
-                    flat_weak = torch.cat(weak_feats, dim=1)
-                    
-                    # Check confidence gating
-                    # Max over all features per sample
-                    max_conf_per_sample = flat_weak.max(dim=1)[0]  # (B,)
-                    apply_consistency = (max_conf_per_sample > self.consistency_conf_threshold).float()
-                
-                # Get predictions on strong augmentation (with gradient)
-                preds_strong = self.model(batch_u_strong['img'])
-                
-                if isinstance(preds_strong, tuple):
-                    preds_strong = preds_strong[0]
-                if not isinstance(preds_strong, (list, tuple)):
-                    preds_strong = [preds_strong]
-                    
-                # Process strong scores
-                strong_feats = []
-                for i, pred in enumerate(preds_strong):
-                    if pred.dim() == 4:
-                        score = pred[:, 4:, :, :].sigmoid()
-                        strong_feats.append(score.flatten(1))
-                    elif pred.dim() == 3:
-                        if pred.shape[1] == self.model.nc + 4:
-                            score = pred[:, 4:, :].sigmoid()
-                        else:
-                            score = pred[..., 4:].sigmoid()
-                        strong_feats.append(score.flatten(1))
-                
-                if not strong_feats:
-                    return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
-                    
-                flat_strong = torch.cat(strong_feats, dim=1)
-                
-                # Cosine similarity per sample
-                cosine_sim = torch.nn.functional.cosine_similarity(
-                    flat_weak, flat_strong, dim=1
-                )  # (B,)
-                
-                # Apply confidence gating
-                cosine_sim_gated = cosine_sim * apply_consistency
-                
-                # Consistency loss: 1 - cosine_similarity
-                # Use max(0) to avoid negative values due to precision
-                loss_consistency = (1 - cosine_sim_gated).clamp(min=0).mean()
-                
-                # Weight by lambda
-                loss_consistency = self.lambda_consistency * loss_consistency
-                
-                loss_items = torch.tensor([
-                    0.0,
-                    loss_consistency.item(),
-                    0.0
-                ], device=self.device)
-            
-            return loss_consistency.unsqueeze(0), loss_items
-            
-        except Exception as e:
-            LOGGER.warning(f'Consistency loss error: {e}. shapes: weak={[p.shape for p in preds_weak]}, strong={[p.shape for p in preds_strong]}')
-            return torch.tensor(0.0, device=self.device), torch.zeros(3, device=self.device)
     
     def _extract_predictions_per_image(self, preds, img_size: int):
         """Extract predictions per image using NMS-Unc.
@@ -549,7 +420,7 @@ class SemiTrainer(DetectionTrainer):
             preds,
             conf_thres=0.01,  # Low threshold to keep more boxes
             iou_thres=0.5,
-            max_det=100,
+            max_det=1000,
             nc=self.model.nc,
             uncertainty_threshold=1.0,  # Disabled - filter later in DSAT
         )
