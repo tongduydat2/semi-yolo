@@ -581,7 +581,12 @@ class SemiTrainer(DetectionTrainer):
                     shutil.copy2(weights_dir / 'last.pt', last_semi_path)
                     LOGGER.info(colorstr('Semi-SSL: ') + 
                                f'Saved last semi checkpoint (epoch={epoch}) → {last_semi_path}')
-
+            current_semi_path = weights_dir / f'current_semi_{epoch}.pt'
+            if (weights_dir / 'last.pt').exists():
+                shutil.copy2(weights_dir / 'last.pt', current_semi_path)
+                LOGGER.info(colorstr('Semi-SSL: ') + 
+                           f'Saved current semi checkpoint (epoch={epoch}) → {current_semi_path}')
+                           
     def _freeze_layers(self):
         """Freeze specified layers by setting requires_grad=False.
         
