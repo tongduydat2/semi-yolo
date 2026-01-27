@@ -50,22 +50,20 @@ graph LR
     end
 
     %% ================= NODE STYLES =================
-    classDef data fill:#ffffff,stroke:#2c3e50,stroke-width:1.5px,color:#111
-    classDef aug fill:#eef5ff,stroke:#1f4fd8,stroke-width:1.5px,color:#111
-    classDef teacher fill:#fff2e6,stroke:#d35400,stroke-width:2px,color:#111
-    classDef student fill:#eafaf1,stroke:#117a65,stroke-width:2px,color:#111
-    classDef pseudo fill:#fffbe6,stroke:#b7950b,stroke-width:1.5px,color:#111
-    classDef filter fill:#f4f6f6,stroke:#566573,stroke-dasharray: 5 5,color:#111
-    classDef loss fill:#fdecea,stroke:#922b21,stroke-width:1.5px,color:#111
-    classDef bp fill:#f5eef8,stroke:#6c3483,stroke-width:1.5px,color:#111
+    classDef data fill:#ffffff,stroke:#2c3e50,stroke-width:1.5px,color:#111,font-size:20px
+    classDef aug fill:#eef5ff,stroke:#1f4fd8,stroke-width:1.5px,color:#111,font-size:20px
+    classDef teacher fill:#fff2e6,stroke:#d35400,stroke-width:2px,color:#111,font-size:20px
+    classDef student fill:#eafaf1,stroke:#117a65,stroke-width:2px,color:#111,font-size:20px
+    classDef pseudo fill:#fffbe6,stroke:#b7950b,stroke-width:1.5px,color:#111,font-size:20px
+    classDef filter fill:#f4f6f6,stroke:#566573,stroke-dasharray: 5 5,color:#111,font-size:20px
+    classDef loss fill:#fdecea,stroke:#922b21,stroke-width:1.5px,color:#111,font-size:20px
+    classDef bp fill:#f5eef8,stroke:#6c3483,stroke-width:1.5px,color:#111,font-size:20px
 
     %% ================= SUBGRAPH STYLES =================
-    style DF fill:#ffffff,stroke:#1f618d,stroke-width:2.5px,color:#111
-    style M  fill:#ffffff,stroke:#148f77,stroke-width:2.5px,color:#111
-    style P  fill:#ffffff,stroke:#b7950b,stroke-width:2.5px,color:#111
-    style TR fill:#ffffff,stroke:#922b21,stroke-width:2.5px,color:#111
-
-
+    style DF fill:#ffffff,stroke:#1f618d,stroke-width:2.5px,color:#111,font-size:20px
+    style M  fill:#ffffff,stroke:#148f77,stroke-width:2.5px,color:#111,font-size:20px
+    style P  fill:#ffffff,stroke:#b7950b,stroke-width:2.5px,color:#111,font-size:20px
+    style TR fill:#ffffff,stroke:#922b21,stroke-width:2.5px,color:#111,font-size:26px
 ```
 
 ### 1.2 Components Chính
