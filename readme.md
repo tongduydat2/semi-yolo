@@ -12,34 +12,60 @@ Dự án triển khai framework **Semi-Supervised Learning** (SSL) cho object de
 
 ```mermaid
 graph LR
-    subgraph "Data Flow"
-        L[Labeled Data] --> SL[Strong Aug]
-        U[Unlabeled Data] --> WA[Weak Aug]
-        U --> SA[Strong Aug]
+    %% ================= DATA FLOW =================
+    subgraph DF["Data Flow"]
+        direction TB
+        L[Labeled Data]:::data --> SL[Strong Aug]:::aug
+        U[Unlabeled Data]:::data --> WA[Weak Aug]:::aug
+        U --> SA[Strong Aug]:::aug
     end
-    
-    subgraph "Models"
-        T[Teacher EMA]
-        S[Student]
+
+    %% ================= MODELS =================
+    subgraph M["Models"]
+        direction TB
+        T[Teacher EMA]:::teacher
+        S[Student]:::student
     end
-    
-    subgraph "Processing"
+
+    %% ================= PROCESSING =================
+    subgraph P["Processing"]
+        direction TB
         WA --> T
-        T --> PL[Pseudo-Labels]
-        PL --> FC[Filter Chain]
-        FC --> FPL[Filtered PL]
+        T --> PL[Pseudo-Labels]:::pseudo
+        PL --> FC[Filter Chain]:::filter
+        FC --> FPL[Filtered PL]:::pseudo
     end
-    
-    subgraph "Training"
-        SL --> S --> LS[Loss Sup]
+
+    %% ================= TRAINING =================
+    subgraph TR["Training"]
+        direction TB
+        SL --> S --> LS[Loss Sup]:::loss
         FPL --> S
-        SA --> S --> LU[Loss Unsup]
-        LS --> TL[Total Loss]
+        SA --> S --> LU[Loss Unsup]:::loss
+        LS --> TL[Total Loss]:::loss
         LU --> TL
-        TL --> BP[Backprop]
+        TL --> BP[Backprop]:::bp
         BP --> S
         S -.->|EMA| T
     end
+
+    %% ================= NODE STYLES =================
+    classDef data fill:#ffffff,stroke:#2c3e50,stroke-width:1.5px,color:#111
+    classDef aug fill:#eef5ff,stroke:#1f4fd8,stroke-width:1.5px,color:#111
+    classDef teacher fill:#fff2e6,stroke:#d35400,stroke-width:2px,color:#111
+    classDef student fill:#eafaf1,stroke:#117a65,stroke-width:2px,color:#111
+    classDef pseudo fill:#fffbe6,stroke:#b7950b,stroke-width:1.5px,color:#111
+    classDef filter fill:#f4f6f6,stroke:#566573,stroke-dasharray: 5 5,color:#111
+    classDef loss fill:#fdecea,stroke:#922b21,stroke-width:1.5px,color:#111
+    classDef bp fill:#f5eef8,stroke:#6c3483,stroke-width:1.5px,color:#111
+
+    %% ================= SUBGRAPH STYLES =================
+    style DF fill:#ffffff,stroke:#1f618d,stroke-width:2.5px,color:#111
+    style M  fill:#ffffff,stroke:#148f77,stroke-width:2.5px,color:#111
+    style P  fill:#ffffff,stroke:#b7950b,stroke-width:2.5px,color:#111
+    style TR fill:#ffffff,stroke:#922b21,stroke-width:2.5px,color:#111
+
+
 ```
 
 ### 1.2 Components Chính
