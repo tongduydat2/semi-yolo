@@ -181,9 +181,9 @@ $$\mathcal{L}_{\text{bg}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \sum_{(i,j
 
 **Gradient Analysis:**
 
-$$\frac{\partial \mathcal{L}_{\text{bg}}}{\partial \hat{y}_{ij}^{c^{*}}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \cdot \sigma(\hat{y}_{ij}^{c^{*}}) \cdot (1 - \sigma(\hat{y}_{ij}^{c^{*}}))$$
+$$\frac{\partial \mathcal{L}_{\text{bg}}}{\partial \hat{y}_{ij}^{k}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \cdot \sigma(\hat{y}_{ij}^{k}) \cdot (1 - \sigma(\hat{y}_{ij}^{k}))$$
 
-với $c^{*} = \arg\max_c \sigma(\hat{y}_{ij}^c)$.
+với $k = \arg\max_c \sigma(\hat{y}_{ij}^c)$ là class có confidence cao nhất.
 
 **Gradient magnitude:** Maximum tại $\sigma(\hat{y}) = 0.5$, bằng $\frac{\lambda_{\text{bg}}}{4|\mathcal{B}|}$.
 
