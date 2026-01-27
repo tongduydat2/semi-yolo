@@ -117,7 +117,7 @@ $$\mathcal{L}_{\text{cls}} = \frac{1}{\sum_{i,j} \mathbf{y}_{ij}} \sum_{i=1}^B \
 
 Với Binary Cross-Entropy:
 
-$$\mathcal{L}_{\text{BCE}}(\hat{y}, y) = -\left[ y \cdot \log \sigma(\hat{y}) + (1-y) \cdot \log(1-\sigma(\hat{y})) \right]$$
+$$\mathcal{L}_{\text{BCE}}(\hat{y}, y) = -\bigl[ y \cdot \log \sigma(\hat{y}) + (1-y) \cdot \log(1-\sigma(\hat{y})) \bigr]$$
 
 **Task-Aligned Learning (TAL) Assignment:**
 
@@ -148,7 +148,7 @@ $$\mathcal{L}_{\text{dfl}} = \frac{1}{\sum_{i,j} \mathbf{y}_{ij}} \sum_{(i,j) \i
 
 Cho target $t \in [0, 15]$ (reg_max=16):
 
-$$\text{DFL}(\hat{\mathbf{d}}, t) = -\left[ (t_r - t) \log p_{t_l} + (t - t_l) \log p_{t_r} \right]$$
+$$\text{DFL}(\hat{\mathbf{d}}, t) = -\bigl[ (t_r - t) \log p_{t_l} + (t - t_l) \log p_{t_r} \bigr]$$
 
 Với:
 - $t_l = \lfloor t \rfloor$, $t_r = t_l + 1$
@@ -189,7 +189,7 @@ với $c^* = \arg\max_c \sigma(\hat{y}_{ij}^c)$.
 
 #### 2.4.3 Focal-Style Penalty (Optional)
 
-$$\mathcal{L}_{\text{bg}}^{\text{focal}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \sum_{(i,j) \in \mathcal{B}} \sum_{c=1}^C \left[ -(1-p_{ij}^c)^\gamma \log(1-p_{ij}^c) \right]$$
+$$\mathcal{L}_{\text{bg}}^{\text{focal}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \sum_{(i,j) \in \mathcal{B}} \sum_{c=1}^C \bigl[ -(1-p_{ij}^c)^\gamma \log(1-p_{ij}^c) \bigr]$$
 
 với $\gamma = 2.0$.
 
