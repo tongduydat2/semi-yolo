@@ -171,7 +171,7 @@ $$\mathcal{L}_{\text{det}} = \lambda_{\text{box}} \cdot \mathcal{L}_{\text{box}}
 
 #### 2.4.1 Background Anchor Definition
 
-$$\mathcal{B} = \left\{ (i,j) : \sum_{c=1}^C y_{ij}^c < \epsilon \right\}$$
+$$\mathcal{B} = \bigl\lbrace (i,j) : \sum_{c=1}^C y_{ij}^c < \epsilon \bigr\rbrace$$
 
 với $\epsilon = 10^{-6}$.
 
@@ -181,9 +181,9 @@ $$\mathcal{L}_{\text{bg}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \sum_{(i,j
 
 **Gradient Analysis:**
 
-$$\frac{\partial \mathcal{L}_{\text{bg}}}{\partial \hat{y}_{ij}^{c^*}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \cdot \sigma(\hat{y}_{ij}^{c^*}) \cdot (1 - \sigma(\hat{y}_{ij}^{c^*}))$$
+$$\frac{\partial \mathcal{L}_{\text{bg}}}{\partial \hat{y}_{ij}^{c^{*}}} = \frac{\lambda_{\text{bg}}}{|\mathcal{B}|} \cdot \sigma(\hat{y}_{ij}^{c^{*}}) \cdot (1 - \sigma(\hat{y}_{ij}^{c^{*}}))$$
 
-với $c^* = \arg\max_c \sigma(\hat{y}_{ij}^c)$.
+với $c^{*} = \arg\max_c \sigma(\hat{y}_{ij}^c)$.
 
 **Gradient magnitude:** Maximum tại $\sigma(\hat{y}) = 0.5$, bằng $\frac{\lambda_{\text{bg}}}{4|\mathcal{B}|}$.
 
