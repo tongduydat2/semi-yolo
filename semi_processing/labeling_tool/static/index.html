@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO Labeling Tool</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Sidebar: Image Gallery (Left) -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h2>🏷️ YOLO Labeler</h2>
+            <div class="stats" id="stats">Loading...</div>
+        </div>
+        
+        <div class="image-gallery" id="imageGallery">
+            <!-- Images will be loaded here -->
+        </div>
+    </aside>
+
+    <!-- Main Content (Center) -->
+    <main class="main-content">
+        <!-- Toolbar -->
+        <div class="toolbar">
+            <div class="toolbar-actions">
+                <button class="btn btn-save" id="btnSave" title="Lưu (E)">
+                    💾 Lưu
+                </button>
+                <button class="btn btn-undo" id="btnUndo" title="Hoàn tác (Ctrl+Z)">
+                    ↩️ Undo
+                </button>
+                <button class="btn btn-clear" id="btnClear" title="Xóa tất cả">
+                    🗑️ Xóa
+                </button>
+            </div>
+
+            <div class="nav-buttons">
+                <button class="btn btn-nav" id="btnPrev" title="Ảnh trước (A)">◀ Trước</button>
+                <span class="image-counter" id="imageCounter">0/0</span>
+                <button class="btn btn-nav" id="btnNext" title="Ảnh sau (D)">Sau ▶</button>
+            </div>
+        </div>
+
+        <!-- Canvas Container -->
+        <div class="canvas-container" id="canvasContainer">
+            <!-- Crosshair lines (shown in draw mode) -->
+            <div class="crosshair-line-vertical" id="crosshairV"></div>
+            <div class="crosshair-line-horizontal" id="crosshairH"></div>
+            
+            <canvas id="annotationCanvas"></canvas>
+            <div class="no-image" id="noImage">
+                <p>📷 Chọn ảnh từ sidebar để bắt đầu gán nhãn</p>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <span id="currentFile">Chưa chọn ảnh</span>
+            <span id="boxCount">0 box</span>
+            <span id="coords">x: 0, y: 0</span>
+        </div>
+    </main>
+
+    <!-- Right Sidebar: Class Labels -->
+    <aside class="right-sidebar" id="rightSidebar">
+        <div class="sidebar-header">
+            <h3>📋 Nhãn</h3>
+        </div>
+        
+        <div class="class-list" id="classList">
+            <!-- Class buttons will be loaded here -->
+        </div>
+        
+        <div class="mode-toggles">
+            <label class="toggle-item">
+                <input type="checkbox" id="toggleDraw" checked>
+                <span>✏️ Chế độ vẽ (Q)</span>
+            </label>
+            <label class="toggle-item">
+                <input type="checkbox" id="toggleSingleLabel">
+                <span>1️⃣ Nhãn đơn (K)</span>
+            </label>
+            <label class="toggle-item">
+                <input type="checkbox" id="toggleAutoSave" checked>
+                <span>💾 Tự lưu (L)</span>
+            </label>
+        </div>
+    </aside>
+
+    <!-- Label Selection Popup (shown after drawing bbox) -->
+    <div class="label-popup" id="labelPopup">
+        <div class="label-popup-content">
+            <div class="label-popup-header">
+                <span>Chọn nhãn:</span>
+                <button class="popup-close" id="popupClose">✕</button>
+            </div>
+            <div class="label-popup-list" id="labelPopupList">
+                <!-- Labels will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Box Popup (shown when pressing F on selected box) -->
+    <div class="label-popup" id="editPopup">
+        <div class="label-popup-content">
+            <div class="label-popup-header">
+                <span>Sửa nhãn:</span>
+                <button class="popup-close" id="editPopupClose">✕</button>
+            </div>
+            <div class="label-popup-list" id="editPopupList">
+                <!-- Labels will be loaded here -->
+            </div>
+            <div class="popup-actions">
+                <button class="btn btn-redraw" id="btnRedraw">✏️ Vẽ lại bbox</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Keyboard Shortcuts Modal -->
+    <div class="modal" id="helpModal">
+        <div class="modal-content">
+            <h3>⌨️ Phím tắt</h3>
+            <table>
+                <tr><th>Phím</th><th>Chức năng</th></tr>
+                <tr><td><kbd>1</kbd>-<kbd>9</kbd></td><td>Chọn nhãn 1-9</td></tr>
+                <tr><td><kbd>Q</kbd></td><td>Bật/Tắt chế độ vẽ</td></tr>
+                <tr><td><kbd>E</kbd></td><td>Lưu nhãn</td></tr>
+                <tr><td><kbd>A</kbd> / <kbd>↑</kbd></td><td>Ảnh trước</td></tr>
+                <tr><td><kbd>D</kbd> / <kbd>↓</kbd></td><td>Ảnh sau</td></tr>
+                <tr><td><kbd>R</kbd> / <kbd>Del</kbd></td><td>Xóa box đang chọn</td></tr>
+                <tr><td><kbd>F</kbd></td><td>Đổi nhãn box (cycle)</td></tr>
+                <tr><td><kbd>K</kbd></td><td>Bật/Tắt nhãn đơn</td></tr>
+                <tr><td><kbd>L</kbd></td><td>Bật/Tắt tự lưu</td></tr>
+                <tr><td><kbd>Z</kbd></td><td>Xác nhận ảnh</td></tr>
+                <tr><td><kbd>X</kbd></td><td>Hủy xác nhận</td></tr>
+                <tr><td><kbd>Ctrl+Z</kbd></td><td>Hoàn tác</td></tr>
+                <tr><td><kbd>Scroll</kbd></td><td>Zoom in/out</td></tr>
+                <tr><td><kbd>?</kbd></td><td>Hiện/Ẩn bảng này</td></tr>
+            </table>
+            <button class="btn" onclick="document.getElementById('helpModal').classList.remove('show')">Đóng</button>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
