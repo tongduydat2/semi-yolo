@@ -33,6 +33,7 @@ from losses.bg_penalty_loss import (
     AdaptiveBgPenaltyScheduler
 )
 from utils.selective_ema import SelectiveModelEMA
+from utils.eval_watcher import EvalDataWatcher
 class SemiTrainer(DetectionTrainer):
     """
     Semi-Supervised Trainer extending Ultralytics DetectionTrainer.
@@ -136,6 +137,9 @@ class SemiTrainer(DetectionTrainer):
         
         # Freeze layers if configured
         self._freeze_layers()
+        
+        # Initialize eval data watcher for human-in-the-loop
+        self._init_eval_watcher()
 
 
     def _init_semi_data(self):
@@ -503,6 +507,67 @@ class SemiTrainer(DetectionTrainer):
         except Exception as e:
             LOGGER.warning(f'DSAT validation failed: {e}')
             return None
+    
+    def _init_eval_watcher(self):
+        """Initialize EvalDataWatcher for human-in-the-loop eval reload."""
+        try:
+            # Get validation data path from self.data
+            val_path = self.data.get('val')
+            if val_path:
+                from pathlib import Path
+                val_dir = Path(val_path)
+                if val_dir.exists():
+                    self._eval_watcher = EvalDataWatcher(eval_dir=val_dir)
+                    counts = self._eval_watcher.get_file_counts()
+                    LOGGER.info(colorstr('Semi-SSL: ') + 
+                               f'Human-in-the-loop enabled: monitoring {val_dir} '
+                               f'({counts["images"]} images, {counts["labels"]} labels)')
+                else:
+                    LOGGER.warning(colorstr('Semi-SSL: ') + 
+                                  f'Eval watcher disabled: {val_dir} not found')
+                    self._eval_watcher = None
+            else:
+                self._eval_watcher = None
+        except Exception as e:
+            LOGGER.warning(f'Failed to initialize eval watcher: {e}')
+            self._eval_watcher = None
+    
+    def validate(self):
+        """Run validation with human-in-the-loop eval data reload support.
+        
+        If eval data directory has changed (human added/modified files),
+        reload the validation dataloader before running validation.
+        
+        Returns:
+            Tuple[Dict, float]: metrics dict and fitness score
+        """
+        # Check for eval data changes (human-in-the-loop)
+        if hasattr(self, '_eval_watcher') and self._eval_watcher is not None:
+            if self._eval_watcher.check_changed():
+                LOGGER.info(colorstr('Semi-SSL: ') + 
+                           '🔄 Eval data changed! Reloading validation dataloader...')
+                
+                # Get updated file counts
+                counts = self._eval_watcher.get_file_counts()
+                LOGGER.info(colorstr('Semi-SSL: ') + 
+                           f'New eval data: {counts["images"]} images, {counts["labels"]} labels')
+                
+                # Reload validation dataloader
+                batch_size = self.args.batch // max(self.world_size, 1)
+                self.test_loader = self.get_dataloader(
+                    self.data.get('val') or self.data.get('test'),
+                    batch_size=batch_size * 2,
+                    rank=RANK,
+                    mode='val',
+                )
+                
+                # Re-create validator with new dataloader
+                self.validator = self.get_validator()
+                LOGGER.info(colorstr('Semi-SSL: ') + 
+                           '✅ Validation dataloader reloaded successfully')
+        
+        # Call parent validate()
+        return super().validate()
 
     def _extract_per_class_f1_from_metrics(self, metrics):
         """Extract per-class F1 scores from validation metrics."""
