@@ -18,6 +18,7 @@ from torch import Tensor
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.utils import LOGGER, RANK, colorstr
+from ultralytics.utils.plotting import Annotator, colors
 from ultralytics.cfg import get_cfg, DEFAULT_CFG
 
 from filters.base import FilterChain, build_filter_chain
@@ -98,6 +99,7 @@ class SemiTrainer(DetectionTrainer):
         self.semi_data = None
 
         self.in_burn_in = True
+        self.last_debug_epoch = -1
         
         # Phase-specific checkpoint tracking
         self.best_fitness_burnin = 0.0  # Best fitness during burn-in
@@ -380,6 +382,16 @@ class SemiTrainer(DetectionTrainer):
                 else:
                     mask = scores > 0.5 # Fallback nếu không có filter
 
+                # [DEBUG] Visualize Pseudo-Labels (Once per epoch)
+                if img_idx == 0 and self.epoch > self.last_debug_epoch:
+                    self.last_debug_epoch = self.epoch
+                    self._save_debug_visualization(
+                        batch_u_weak['img'][0], 
+                        boxes, labels, scores, mask,
+                        img_size,
+                        f"epoch_{self.epoch}_batch_0.jpg"
+                    )
+
                 if mask.sum().item() > 0:
                     # Convert sang xywh normalized (YOLO format)
                     boxes_xywh = self._xyxy_to_xywhn(boxes[mask], img_size)
@@ -430,6 +442,44 @@ class SemiTrainer(DetectionTrainer):
         )
         
         return per_image_results
+    
+    def _save_debug_visualization(self, img_tensor, boxes, labels, scores, mask, img_size, filename):
+        """Save a visualization of predicted pseudo-labels for debugging."""
+        try:
+            # Create debug directory
+            debug_dir = self.save_dir / 'debug_pseudo'
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Convert image tensor to numpy
+            if img_tensor.max() <= 1.0:
+                img_tensor = img_tensor * 255.0
+            
+            img_numpy = img_tensor.cpu().numpy().transpose(1, 2, 0).astype(np.uint8)
+            img_numpy = np.ascontiguousarray(img_numpy) # CV2 needs contiguous
+            
+            # Apply mask to get final pseudo-labels
+            if mask is not None:
+                boxes = boxes[mask]
+                labels = labels[mask]
+                scores = scores[mask]
+            
+            annotator = Annotator(img_numpy, line_width=2, example=str(self.model.names))
+            
+            if len(boxes) > 0:
+                for j, box in enumerate(boxes):
+                    cls = int(labels[j])
+                    conf = float(scores[j])
+                    class_name = self.model.names[cls] if hasattr(self.model, 'names') else str(cls)
+                    label = f"{class_name} {conf:.2f}"
+                    annotator.box_label(box, label, color=colors(cls, True))
+            
+            # Save
+            import cv2
+            save_path = debug_dir / filename
+            cv2.imwrite(str(save_path), annotator.result())
+            
+        except Exception as e:
+            LOGGER.warning(f"Failed to save debug visualization: {e}")
     
     def _apply_filters(self, teacher_pred):
         """Apply filter chain from config."""
